@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# bench - paired timing of commands on identical input: warmup, N runs interleaved (A B A B ...), median and spread
+# (min, p90, max) per command, peak RSS, and the ratio of medians. Python only for the clock and rusage.
+#   scripts/bench [-n RUNS] [-w WARMUP] -- 'cmd A' 'cmd B' ...      first command is the baseline
+set -uo pipefail
+n=20 w=3
+while getopts n:w: o; do case $o in n) n=$OPTARG ;; w) w=$OPTARG ;; *) exit 2 ;; esac; done
+shift $((OPTIND - 1)); [[ ${1:-} == -- ]] && shift
+(( $# >= 1 )) || { sed -n '2,6p' "$0"; exit 2; }
+python3 -I - "$n" "$w" "$@" <<'PY'
+import resource, statistics as st, subprocess, sys, time
+n, w, cmds = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
+def run(c):
+    r0 = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    t = time.perf_counter()
+    rc = subprocess.run(c, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    return time.perf_counter() - t, rc
+for _ in range(w):
+    for c in cmds: run(c)
+times = [[] for _ in cmds]; bad = [0] * len(cmds)
+for _ in range(n):
+    for i, c in enumerate(cmds):
+        t, rc = run(c); times[i].append(t); bad[i] += rc != 0
+rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+base = st.median(times[0])
+for i, c in enumerate(cmds):
+    t = sorted(times[i]); p90 = t[min(len(t) - 1, int(len(t) * .9))]
+    print(f"{st.median(t)*1000:9.2f} ms median  min {t[0]*1000:8.2f}  p90 {p90*1000:8.2f}  max {t[-1]*1000:8.2f}  "
+          f"x{st.median(t)/base:5.2f}  fails {bad[i]}/{n}  {c}")
+print(f"peak RSS of any child: {rss} KB   runs {n} (warmup {w}), interleaved")
+PY

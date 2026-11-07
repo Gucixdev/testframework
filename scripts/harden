@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# harden - how hard is this binary to take apart and to exploit? Facts from readelf/nm/strings, one line each, no
+# opinion: PIE, RELRO, NX stack, stack canary, FORTIFY, stripped, debug info, symbol and string counts, leaked
+# paths/URLs/build ids. "easy" means a reverse engineer reads names and strings straight off it.
+#   scripts/harden BINARY
+set -uo pipefail
+f=${1:?usage: scripts/harden BINARY}
+[[ -f $f ]] || { echo "no such file: $f" >&2; exit 2; }
+file -b "$f" | cut -c1-110
+h=$(readelf -h "$f" 2>/dev/null) || { echo "not an ELF file: no checks"; exit 0; }
+l=$(readelf -lW "$f" 2>/dev/null); d=$(readelf -d "$f" 2>/dev/null); s=$(readelf -sW "$f" 2>/dev/null)
+row() { printf '  %-14s %-6s %s\n' "$1" "$2" "$3"; }
+grep -q 'Type:.*DYN' <<< "$h" && row PIE yes "address randomised when the loader supports it" || row PIE no "fixed addresses: gadgets are at known places"
+if grep -q GNU_RELRO <<< "$l"; then grep -q 'BIND_NOW\|FLAGS.*NOW' <<< "$d" && row RELRO full "GOT read-only" || row RELRO partial "GOT still writable"; else row RELRO none "GOT overwritable"; fi
+grep -E 'GNU_STACK' <<< "$l" | grep -q 'RWE' && row NX-stack NO "executable stack" || row NX-stack yes "stack not executable"
+grep -q '__stack_chk_fail' <<< "$s" && row canary yes "stack protector present" || row canary no "no stack protector"
+grep -q '_chk@\|_chk$' <<< "$s" && row FORTIFY yes "_chk functions used" || row FORTIFY no "no _chk functions"
+n=$(nm "$f" 2>/dev/null | wc -l)
+(( n > 0 )) && row symbols "$n" "names of functions and globals are readable (strip to remove)" || row symbols 0 "stripped"
+readelf -S "$f" 2>/dev/null | grep -q '\.debug_info' && row debug-info yes "types, line numbers and locals are in the file" || row debug-info no ""
+row strings "$(strings -n 6 "$f" | wc -l)" "printable strings of 6+ chars"
+p=$(strings -n 6 "$f" | grep -cE '(/home/|/usr/src|/tmp/|\.c:|https?://)')
+row leaked-paths "$p" "$(strings -n 6 "$f" | grep -E '(/home/|/usr/src|/tmp/)' | head -2 | tr '\n' ' ')"
+readelf -n "$f" 2>/dev/null | grep -q 'Build ID' && row build-id yes "$(readelf -n "$f" | grep -m1 'Build ID' | awk '{print $3}')" || row build-id no ""
+row static "$(grep -q 'NEEDED' <<< "$d" && echo no || echo yes)" "$(grep NEEDED <<< "$d" | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' ')"

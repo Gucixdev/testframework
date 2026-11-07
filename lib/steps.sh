@@ -19,6 +19,13 @@
 #   inject                            the Nth malloc/realloc/mmap fails (LD_PRELOAD, N = 1..INJECT_MAX, default 40): the run
 #                                     must end with exit 0 or a deliberate trap/abort, never SIGSEGV/SIGBUS, never a hang
 #   cov                               gcov line coverage of ../src over the differential seeds; COV_MIN (default 0) gates
+#   portable                          the harness built with zig cc for every CPU in PORT_TARGETS (x86, ARM 32/64, RISC-V,
+#                                     MIPS, PowerPC, s390x big-endian, LoongArch, ...) and run under qemu-user: its output
+#                                     must equal the model's replay, so word size, endianness and alignment are tested
+#                                     too. A target that cannot be built or has no qemu is listed as skipped, never ok.
+#   platforms                         does the harness BUILD for Windows, macOS, FreeBSD, NetBSD (zig cc, compile only)? Prints
+#                                     a table. Built is not the same as works: only Linux targets are also RUN (qemu), so every
+#                                     other row says "builds, not run" until you run it on that system or in a VM (or wine).
 #   lean_end                          the mutant line, then exit 1 if any step failed
 #
 # SEEDS=N sets the seeds per compiler (default 200), OPS=N the operations per run (default 3000). Each step prints
@@ -205,6 +212,51 @@ cov() {
     pct=$(awk -F'[: %]+' '/Lines executed/{ split($0,a,"of "); n+=$3*a[2]/100; t+=a[2] } END { if (t) printf "%.1f", 100*n/t; else print 0 }' <<< "$out")
     if awk -v p="$pct" -v m="$min" 'BEGIN{exit !(p+0 >= m+0)}'; then step ok "coverage: ${pct}% of src lines run by the harness (gate ${min}%)"
     else step FAIL "coverage: ${pct}% < ${min}%"; fi
+}
+
+# triple|qemu binary|label. Zig builds all of them with its own musl, static, no sysroot needed.
+PORT_TARGETS_DEFAULT="x86-linux-musl|qemu-i386|i386(32bit) arm-linux-musleabihf|qemu-arm|armv7 aarch64-linux-musl|qemu-aarch64|aarch64 riscv64-linux-musl|qemu-riscv64|riscv64 mips-linux-musl|qemu-mips|mips(BE,32bit) mipsel-linux-musl|qemu-mipsel|mipsel(32bit) mips64-linux-musl|qemu-mips64|mips64(BE) powerpc-linux-musl|qemu-ppc|ppc32(BE) powerpc64le-linux-musl|qemu-ppc64le|ppc64le s390x-linux-musl|qemu-s390x|s390x(BE) loongarch64-linux-musl|qemu-loongarch64|loongarch64 m68k-linux-musl|qemu-m68k|m68k(BE,16bit-aligned)"
+
+portable() {
+    local spec triple qemu label s ok="" bad="" skip="" t out
+    (( lean_ready )) || { step FAIL "portable: needs a passing diff_test first"; return; }
+    command -v zig > /dev/null || { step FAIL "portable: zig not found (zig cc is the cross compiler)"; return; }
+    for spec in ${PORT_TARGETS:-$PORT_TARGETS_DEFAULT}; do
+        IFS='|' read -r triple qemu label <<< "$spec"
+        command -v "$qemu" > /dev/null || command -v "$qemu-static" > /dev/null || { skip="$skip $label(no-qemu)"; continue; }
+        t=$lean_tmp/x_${triple}
+        if ! zig cc -target "$triple" -std=gnu11 -O2 -w -D_GNU_SOURCE -I../src -o "$t" "$lean_harness" -lm 2> "$lean_tmp/zig.err"; then
+            skip="$skip $label(build:$(grep -m1 -oE 'error: .{0,50}' "$lean_tmp/zig.err" | head -1))"; continue
+        fi
+        out=ok
+        for s in $(seq 1 "${PORTSEEDS:-3}"); do
+            { timeout "${PORT_TIMEOUT:-120}" "$(command -v "$qemu" || command -v "$qemu-static")" "$t" "$s" "${PORT_OPS:-1000}" > "$lean_tmp/c" 2> /dev/null; } 2> /dev/null
+            "$lean_oracle" < "$lean_tmp/c" > "$lean_tmp/l" 2> /dev/null && [[ -s $lean_tmp/c ]] && cmp -s "$lean_tmp/c" "$lean_tmp/l" || { out=diff; break; }
+        done
+        [[ $out == ok ]] && ok="$ok $label" || bad="$bad $label"
+    done
+    if [[ -z $bad && -n $ok ]]; then step ok "portable: C equals the model on:$ok${skip:+  | skipped:$skip}"
+    else step FAIL "portable: wrong output on:${bad:- none ran}${skip:+  | skipped:$skip}"; fi
+}
+
+platforms() {
+    local spec triple os label err rows="" n=0 b=0 can_run
+    command -v zig > /dev/null || { step FAIL "platforms: zig not found"; return; }
+    for spec in linux:x86_64-linux-gnu linux:x86_64-linux-musl windows:x86_64-windows-gnu windows:x86-windows-gnu windows:aarch64-windows-gnu \
+                macos:x86_64-macos macos:aarch64-macos freebsd:x86_64-freebsd freebsd:aarch64-freebsd netbsd:x86_64-netbsd; do
+        os=${spec%%:*} triple=${spec#*:}; n=$((n + 1))
+        if zig cc -target "$triple" -std=gnu11 -O2 -w -D_GNU_SOURCE -I../src -o "$lean_tmp/p_$triple" "$lean_harness" -lm 2> "$lean_tmp/pl.err"; then
+            b=$((b + 1)); can_run="builds, not run"
+            [[ $os == linux ]] && can_run="builds, RUN (this machine)"
+            [[ $os == windows ]] && command -v wine > /dev/null && can_run="builds, wine available"
+            printf '    %-8s %-24s %s\n' "$os" "$triple" "$can_run" >> "$lean_tmp/plat.txt"
+        else
+            err=$(grep -m1 -oE "(error|fatal error): .{0,70}" "$lean_tmp/pl.err")
+            printf '    %-8s %-24s DOES NOT BUILD: %s\n' "$os" "$triple" "$err" >> "$lean_tmp/plat.txt"
+        fi
+    done
+    cat "$lean_tmp/plat.txt"
+    step ok "platforms: $b of $n targets build (see the table; only Linux is run here)"
 }
 
 mutant() {

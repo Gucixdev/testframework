@@ -15,6 +15,10 @@
 #                                     memory cap (ENOMEM paths) must end in a clean exit or a clean abort, never a hang
 #   stress                            big operation counts, NPROC runs in parallel, same seed twice: identical output
 #                                     (no nondeterminism, no leak that grows), time and peak RSS printed
+#   tsan                              the harness under ThreadSanitizer (data races abort) and a 30 s deadlock timeout
+#   inject                            the Nth malloc/realloc/mmap fails (LD_PRELOAD, N = 1..INJECT_MAX, default 40): the run
+#                                     must end with exit 0 or a deliberate trap/abort, never SIGSEGV/SIGBUS, never a hang
+#   cov                               gcov line coverage of ../src over the differential seeds; COV_MIN (default 0) gates
 #   lean_end                          the mutant line, then exit 1 if any step failed
 #
 # SEEDS=N sets the seeds per compiler (default 200), OPS=N the operations per run (default 3000). Each step prints
@@ -156,6 +160,51 @@ stress() {
     rss=$(python3 -c 'import resource,subprocess,sys;subprocess.run(sys.argv[1:],stdout=subprocess.DEVNULL);print(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)' \
         "$lean_tmp/st" 4242 "$big" 2> /dev/null)
     step ok "stress: $big operations x $par parallel, identical and equal to the model; $((SECONDS - t0))s, peak RSS ${rss:-?} KB"
+}
+
+tsan() {
+    local s bad="" n=0
+    (( lean_ready )) || { step FAIL "tsan: needs a passing diff_test first"; return; }
+    lean_cc_ clang "$lean_tmp/ts" -fsanitize=thread || lean_cc_ gcc "$lean_tmp/ts" -fsanitize=thread || { step FAIL "tsan: build"; return; }
+    for s in $(seq 1 "${TSANSEEDS:-10}"); do
+        if { TSAN_OPTIONS=halt_on_error=1 timeout 30 "$lean_tmp/ts" "$s" "${OPS:-3000}" > /dev/null 2> "$lean_tmp/ts.err"; }; then n=$((n + 1))
+        else bad="seed$s(rc=$?)"; head -8 "$lean_tmp/ts.err"; break; fi
+    done 2> /dev/null
+    if [[ -z $bad ]]; then step ok "tsan: $n runs without a race or deadlock"; else step FAIL "tsan: $bad"; fi
+}
+
+inject() {
+    local n rc total max=${INJECT_MAX:-300} clean=0 refused=0 bad="" here
+    here=$(dirname "${BASH_SOURCE[0]}")
+    (( lean_ready )) || { step FAIL "inject: needs a passing diff_test first"; return; }
+    cc -shared -fPIC -o "$lean_tmp/inject.so" "$here/inject.c" -ldl 2> /dev/null || { step FAIL "inject: build shim"; return; }
+    lean_cc_ gcc "$lean_tmp/ij" -O2 || { step FAIL "inject: build"; return; }
+    { INJECT_REPORT="$lean_tmp/ij.n" LD_PRELOAD="$lean_tmp/inject.so" "$lean_tmp/ij" 3 2000 > /dev/null 2> /dev/null; } 2> /dev/null
+    total=$(cat "$lean_tmp/ij.n" 2> /dev/null || echo 0)
+    (( total > 0 )) || { step FAIL "inject: the shim saw no malloc/realloc/mmap call (static binary?)"; return; }
+    (( max > total )) && max=$total
+    for n in $(seq 1 "$max"); do
+        { INJECT_N=$n LD_PRELOAD="$lean_tmp/inject.so" timeout 20 "$lean_tmp/ij" 3 2000 > /dev/null 2> /dev/null; } 2> /dev/null; rc=$?
+        case $rc in
+            0) clean=$((clean + 1)) ;;
+            132|134) refused=$((refused + 1)) ;;   # SIGILL from __builtin_trap, SIGABRT: a deliberate refusal
+            *) bad="$bad N=$n(rc=$rc)" ;;
+        esac
+    done
+    if [[ -z $bad ]]; then step ok "inject: every one of the first $max of $total calls failed in turn, $clean carried on, $refused refused by trap/abort, none crashed or hung"
+    else step FAIL "inject:$bad"; fi
+}
+
+cov() {
+    local d s out pct min=${COV_MIN:-0}
+    (( lean_ready )) || { step FAIL "cov: needs a passing diff_test first"; return; }
+    d=$(mktemp -d "$lean_tmp/cov.XXXX")
+    gcc -std=gnu11 -O0 -w -D_GNU_SOURCE -I../src --coverage -o "$d/h" "$lean_harness" -lm 2> /dev/null || { step FAIL "cov: build"; return; }
+    for s in $(seq 1 "${COVSEEDS:-30}"); do "$d/h" "$s" "${OPS:-3000}" > /dev/null 2>&1; done
+    out=$(cd "$d" && gcov -n -o . h-*.gcda 2> /dev/null | awk "/^File '.*src\\//{f=1;next} /^File /{f=0} f&&/Lines executed/{print}")
+    pct=$(awk -F'[: %]+' '/Lines executed/{ split($0,a,"of "); n+=$3*a[2]/100; t+=a[2] } END { if (t) printf "%.1f", 100*n/t; else print 0 }' <<< "$out")
+    if awk -v p="$pct" -v m="$min" 'BEGIN{exit !(p+0 >= m+0)}'; then step ok "coverage: ${pct}% of src lines run by the harness (gate ${min}%)"
+    else step FAIL "coverage: ${pct}% < ${min}%"; fi
 }
 
 mutant() {

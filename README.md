@@ -1,9 +1,9 @@
-# battery
+# testframework (working name)
 
 One test framework, all batteries included, for code that has to be right: a C (or other) implementation is
 checked against a plain reference model proved in Lean 4, and then attacked from every side the same way.
 
-Status: scaffold. `lib/steps.sh` is copied from holyc's `lean4/lib.sh` (the steps below marked "have" run today);
+Status: scaffold. `lib/steps.sh` is copied from holyc's `lean4/lib.sh` (steps marked "have" run today);
 holyc keeps its own copy until a project is moved over and its tests still pass.
 
 ## Coverage matrix
@@ -30,3 +30,11 @@ holyc keeps its own copy until a project is moved over and its tests still pass.
 
 A step prints `ok` or `FAIL` and a one-line summary; a step that cannot run says so and fails, never silently
 passes. A step needs a passing `diff_test` first, so it never attacks code the model already disagrees with.
+
+## Layout
+
+- `lean/` - one Lake package, `require testframework from "<path>/lean"`: Mathlib (and so batteries, aesop,
+  plausible, Qq), TrustLean, AMO-Lean, and `Tf/` (the shared modules: Audit, Oracle, Bits).
+- `lib/steps.sh` - the steps, one bash function each.
+- `scripts/` - any step may be bash or Python; a script prints `ok`/`FAIL` lines the same way.
+- Not yet built: `lake update` here (Mathlib is a multi-GB download; vecindex already has the 4.26.0 cache).

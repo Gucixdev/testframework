@@ -34,7 +34,7 @@ lean_build() {
 }
 
 lean_audit() {
-    if lake build +Holyc.Audit > .lake-audit.log 2>&1 && lake env lean Audit.lean > .lake-audit.log 2>&1 &&
+    if lake build +Tf.Audit > .lake-audit.log 2>&1 && lake env lean Audit.lean > .lake-audit.log 2>&1 &&
             grep -q 'none rests' .lake-audit.log; then
         step ok "$(grep -oE 'axiom audit: [0-9]+ theorems \([0-9]+ written' .lake-audit.log) in the sources)"
     else cat .lake-audit.log; step FAIL "axiom audit"; fi

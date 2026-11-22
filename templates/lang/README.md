@@ -14,6 +14,9 @@ its own `tools/build`, `tools/test`, `tools/check`, a tiny source, and a sample 
 | bash | `bash -n` | bats | shellcheck | logic, quoting, exit codes |
 | lean | `lake build` | build plus no `sorry` | no sorry/admit/native_decide in src | the proofs themselves |
 
-The heavy, cross-language steps (differential test against a Lean model, fuzzing, crash, stress, inject, portable
-under qemu) are in `src/test/steps.sh` and work on a C harness today. They stay C-only until a second language
-gets a harness; the table in the top README marks which are done.
+The differential test is language-agnostic: a harness in any language prints one line per operation for
+`HARNESS SEED OPS`, the Lean oracle replays the lines on the model, and the output must be identical. `diff_test`
+(in `src/test/steps.sh`) picks the build by extension: `.c` gcc and clang, `.rs` release and debug (overflow checks),
+`.go` plain and `-race`, `.py` python3, `.sh` bash. `fuzz_diff` then works for them all too. The rest (sanitize,
+crash_test, stress, tsan, inject, cov, portable, mutant) are still C-only and say so when given another harness.
+`examples/counter` is the same Lean model checked against one harness per language; `./run` there shows all five.

@@ -2,5 +2,6 @@
 # test - pytest over test/. 0 arguments.
 set -u
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+PATH=$PWD/.venv/bin:$PATH  # tools from ./requirements (pip kind) live in the project venv
 command -v pytest > /dev/null || { echo "test: pytest is missing" >&2; exit 1; }
 pytest -q -p no:cacheprovider test

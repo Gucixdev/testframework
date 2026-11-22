@@ -1,0 +1,84 @@
+# requirements.list - everything the devframework needs on one machine: compilers, debuggers, runtimes, linters,
+# benchmark and media tools. `./requirements` installs what is missing, `./requirements check` only tells.
+# Line forms are in `./requirements --help`. pacman=- (or apt=- ...) means that distro has no package; the nix= name is
+# then used when nix is installed. Names for pacman were checked against the repos; apt and nix names are best effort.
+
+# --- C and C++ ---
+cmd gcc
+cmd g++ pacman=gcc apt=g++
+cmd clang apt=clang nix=clang
+cmd clangd pacman=clang apt=clangd nix=clang-tools
+cmd clang-tidy pacman=clang apt=clang-tidy nix=clang-tools
+cmd make pacman=make apt=make nix=gnumake
+cmd cmake
+cmd ninja apt=ninja-build
+cmd pkg-config pacman=pkgconf apt=pkg-config nix=pkg-config
+cmd ccache
+cmd bear
+cmd cppcheck
+cmd lcov
+cmd gcov pacman=gcc apt=gcc
+
+# --- debuggers, profilers, tracers ---
+cmd gdb
+cmd lldb
+cmd valgrind
+cmd strace
+cmd ltrace
+cmd perf pacman=perf apt=linux-perf nix=linuxPackages.perf
+cmd heaptrack
+cmd hyperfine
+cmd dlv pacman=delve apt=delve nix=delve
+cmd renderdoccmd pacman=renderdoc apt=renderdoc nix=renderdoc
+
+# --- fuzzing, emulation, portability ---
+cmd afl-fuzz pacman=afl++ apt=afl++ nix=aflplusplus
+cmd qemu-aarch64 pacman=qemu-user apt=qemu-user nix=qemu
+cmd zig pacman=zig apt=- nix=zig
+
+# --- Rust ---
+cmd rustc pacman=rust apt=rustc nix=rustc
+cmd cargo pacman=rust apt=cargo nix=cargo
+cmd cargo-audit pacman=cargo-audit apt=- nix=cargo-audit
+cmd cargo-fuzz pacman=cargo-fuzz apt=- nix=cargo-fuzz
+
+# --- Go ---
+cmd go pacman=go apt=golang-go nix=go
+cmd staticcheck pacman=staticcheck apt=golang-honnef-go-tools-dev nix=go-tools
+
+# --- Python (tools go into ./.venv, never into the system) ---
+cmd python3 pacman=python apt=python3 nix=python3
+cmd pip pacman=python-pip apt=python3-pip nix=python3Packages.pip
+pip pytest
+pip ruff
+pip mypy
+pip pyflakes
+
+# --- JavaScript, TypeScript, JVM, .NET, Perl, Lua ---
+cmd node pacman=nodejs apt=nodejs nix=nodejs
+cmd npm pacman=npm apt=npm nix=nodejs
+cmd tsc pacman=typescript apt=node-typescript nix=typescript
+cmd deno
+cmd bun pacman=bun apt=- nix=bun
+cmd javac pacman=jdk-openjdk apt=default-jdk nix=jdk
+cmd dotnet pacman=dotnet-sdk apt=dotnet-sdk-8.0 nix=dotnet-sdk
+cmd perl
+cmd lua
+cmd luajit
+cmd tl pacman=teal apt=- nix=luaPackages.tl
+
+# --- Lean 4 ---
+cmd elan pacman=- apt=- nix=elan
+
+# --- shell ---
+cmd bash
+cmd shellcheck
+cmd bats
+cmd shfmt
+
+# --- media and demos (autodemo) ---
+cmd ffmpeg
+cmd tmux
+cmd Xwayland pacman=xorg-xwayland apt=xwayland nix=xwayland
+pc freetype2 pacman=freetype2 apt=libfreetype-dev nix=freetype
+pc libwebp pacman=libwebp apt=libwebp-dev nix=libwebp

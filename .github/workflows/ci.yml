@@ -1,0 +1,12 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          grep -rlE "^#!.*(ba)?sh" --exclude-dir=.git --exclude="*.bats" --exclude="*.md" . | while read -r f; do bash -n "$f" || exit 1; done

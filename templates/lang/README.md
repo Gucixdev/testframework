@@ -16,7 +16,14 @@ its own `tools/build`, `tools/test`, `tools/check`, a tiny source, and a sample 
 
 The differential test is language-agnostic: a harness in any language prints one line per operation for
 `HARNESS SEED OPS`, the Lean oracle replays the lines on the model, and the output must be identical. `diff_test`
-(in `src/test/steps.sh`) picks the build by extension: `.c` gcc and clang, `.rs` release and debug (overflow checks),
-`.go` plain and `-race`, `.py` python3, `.sh` bash. `fuzz_diff` then works for them all too. The rest (sanitize,
-crash_test, stress, tsan, inject, cov, portable, mutant) are still C-only and say so when given another harness.
-`examples/counter` is the same Lean model checked against one harness per language; `./run` there shows all five.
+(in `src/test/steps.sh`) finds the language from the extension, else from the shebang, so a script without `.sh`
+works. Builds: C (gcc, clang), C++ (g++, clang++), Rust (release, debug with overflow checks), Go (plain, `-race`),
+Zig, Java, C# (dotnet SDK), Python, bash, Perl, Lua (and luajit), JavaScript (node, bun), TypeScript (tsc then node),
+Teal (`tl`), and Lean itself (`lean --run`, the implementation in the model's own language). A toolchain that is not
+installed is listed as skipped; with `SKIP_MISSING=1` that is a visible SKIP line, otherwise the step fails.
+`fuzz_diff` works for all of them. The rest (sanitize, crash_test, stress, tsan, inject, cov, portable, mutant) are
+C-only and say so when given another harness.
+
+`examples/counter` is one Lean model checked against one harness per language; `./run` shows them all. Run on this
+machine: C, C++, Rust, Go, Java, Python, bash, Perl, Lua, luajit, JavaScript, bun, TypeScript, Lean. Written but not
+run here (toolchain missing): C#, Teal, Zig.

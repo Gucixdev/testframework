@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# run - the same Lean model checked against one implementation per language (C, Rust, Go, Python, bash). 0 arguments.
+# run - the same Lean model checked against one implementation per language (C, C++, Rust, Go, Java, C#, Python, bash, Perl, Lua, JS, TS, Lean; the kind comes from the extension or the shebang). 0 arguments.
 # A harness prints one line per operation for HARNESS SEED OPS; the Lean oracle replays the lines; they must be identical.
-SEEDS=${SEEDS:-30} OPS=${OPS:-300}
+SEEDS=${SEEDS:-30} OPS=${OPS:-300} SKIP_MISSING=${SKIP_MISSING:-1}
 . "$(dirname "$0")/../../src/test/steps.sh" || exit 2
 lean_build
 lean_scan
-for h in harness/c.c harness/rust.rs harness/go.go harness/python.py harness/bash.sh; do
-	lean_main=
+for h in harness/*; do
 	diff_test "$h" oracle
 done
 fuzz_diff

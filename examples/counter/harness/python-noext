@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+import sys
+
+seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+n = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+x = (seed * 2654435761 + 1) & 0xFFFFFFFF
+
+
+def rnd():
+    global x
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= x >> 17
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x
+
+
+s = 0
+out = []
+for _ in range(n):
+    op, a = rnd() % 3, rnd() % 100
+    name = ("add", "sub", "reset")[op]
+    s = min(s + a, 100) if op == 0 else max(s - a, 0) if op == 1 else 0
+    out.append(f"{name} {a} {s}")
+print("\n".join(out))

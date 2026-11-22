@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# check - gofmt must list nothing, go vet clean; staticcheck when installed. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+fail=0
+bad=$(gofmt -l src); [ -z "$bad" ] || { echo "gofmt: $bad"; fail=1; }
+go vet ./src/... || fail=1
+command -v staticcheck > /dev/null && { staticcheck ./src/... || fail=1; }
+[ "$fail" = 0 ] && echo "ok   check"
+exit "$fail"

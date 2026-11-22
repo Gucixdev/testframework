@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# new - start a project: the language-neutral skeleton (project/) with one language's tools, sources and sample test on top.
+# 0 arguments, the choices come from the environment:   KIND=c|rust|go|python|bash|lean   NAME=my-project   [DEST=dir, default .]
+# Never writes into a directory that already exists.
+set -eu
+here=$(dirname "$(readlink -f "$0")")
+kind=${KIND:?KIND is one of: $(cd "$here/lang" && echo *)}
+name=${NAME:?NAME is the project directory name}
+[ -d "$here/lang/$kind" ] || { echo "new: no template for KIND=$kind (have: $(cd "$here/lang" && echo *))" >&2; exit 2; }
+case $name in */* | .* | '') echo "new: NAME is a plain directory name" >&2; exit 2 ;; esac
+dest=${DEST:-.}/$name
+[ ! -e "$dest" ] || { echo "new: $dest exists" >&2; exit 1; }
+mkdir -p "$dest"
+cp -r "$here/project/." "$dest/"
+cp -r "$here/lang/$kind/." "$dest/"
+# cp keeps the mode of a file it overwrites: make every tool executable
+for f in "$dest"/tools/*; do [ -s "$f" ] \
+  && head -1 "$f" | grep -q '^#!' && chmod +x "$f"; done
+# the language's tools/{build,test,check} have replaced the neutral ones; bench and the rest stay as they are
+[ -f "$dest/gitignore" ] && mv "$dest/gitignore" "$dest/.gitignore"
+printf 'new: %s (%s) in %s\n' "$name" "$kind" "$dest"

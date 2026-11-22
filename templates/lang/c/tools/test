@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# test - every test/test_*.c is built with gcc and clang plus ASan+UBSan and run; exit status says it all. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+srcs=$(ls src/*.c | grep -v main.c)
+for t in test/test_*.c; do
+	for cc in gcc clang; do
+		command -v "$cc" > /dev/null || { echo "skip $t ($cc missing)"; continue; }
+		# shellcheck disable=SC2086
+		if "$cc" -std=c11 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Wall -Wextra -o "$tmp/t" "$t" $srcs 2> "$tmp/err" && "$tmp/t" > "$tmp/out" 2>&1; then
+			echo "ok   $t ($cc)"
+		else
+			echo "FAIL $t ($cc)"; cat "$tmp/err" "$tmp/out" 2> /dev/null | sed 's/^/     /'; fail=1
+		fi
+	done
+done
+exit "$fail"

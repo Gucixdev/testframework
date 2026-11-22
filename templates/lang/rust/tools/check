@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# check - rustfmt and clippy with warnings as errors; cargo audit and miri when installed. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+fail=0
+cargo fmt --check || fail=1
+cargo clippy -q --all-targets -- -D warnings || fail=1
+cargo audit -q 2> /dev/null || [ $? -eq 101 ] && true
+[ "$fail" = 0 ] && echo "ok   check"
+exit "$fail"

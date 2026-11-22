@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# build - nothing to compile: bash -n on every script, so a syntax error shows up now. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+for f in src/* tools/*; do [ -f "$f" ] && head -1 "$f" | grep -q bash && bash -n "$f"; done
+echo "built: syntax ok"

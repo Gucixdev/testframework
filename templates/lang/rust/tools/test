@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test - cargo test (unit tests live next to the code, integration tests in tests/). 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+cargo test -q 2>&1 | tail -5
+exit "${PIPESTATUS[0]}"

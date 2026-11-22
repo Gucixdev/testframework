@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# check - lint: warnings are errors under gcc and clang with -O2 (more flow analysis), cppcheck when installed. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+fail=0
+for cc in gcc clang; do
+	command -v "$cc" > /dev/null || continue
+	for f in src/*.c; do "$cc" -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -fsyntax-only "$f" || fail=1; done
+done
+command -v cppcheck > /dev/null && { cppcheck -q --error-exitcode=1 --enable=warning,portability src || fail=1; }
+[ "$fail" = 0 ] && echo "ok   check"
+exit "$fail"

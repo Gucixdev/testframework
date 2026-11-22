@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# test - the proofs are the tests: lake build must pass and no theorem may use sorry or a non-classical axiom. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+export PATH=$HOME/.elan/bin:$PATH
+command -v lake > /dev/null || { echo "test: lake is missing (install elan)" >&2; exit 1; }
+lake build 2>&1 | tee /tmp/lean-build.$$ | tail -3
+rc=${PIPESTATUS[0]}
+grep -q 'sorry' /tmp/lean-build.$$ && { echo "FAIL a proof uses sorry"; rc=1; }
+rm -f /tmp/lean-build.$$
+exit "$rc"

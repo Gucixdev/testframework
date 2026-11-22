@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# app - prints the sum of its two environment numbers A and B (default 2 and 3). 0 arguments.
+set -euo pipefail
+echo $(( ${A:-2} + ${B:-3} ))

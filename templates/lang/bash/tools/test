@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# test - bats over test/*.bats (needs bats). 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+command -v bats > /dev/null || { echo "test: bats is missing" >&2; exit 1; }
+bats test

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# build - compile src/*.c into bin/NAME with gcc (or CC). Only redoes it when a source is newer. BUILD_FORCE=1 rebuilds. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+name=$(basename "$PWD"); cc=${CC:-gcc}
+command -v "$cc" > /dev/null || { echo "build: $cc is missing" >&2; exit 1; }
+mkdir -p bin
+if [ -z "${BUILD_FORCE:-}" ] && [ -x "bin/$name" ] && [ -z "$(find src -newer "bin/$name" -type f | head -1)" ]; then echo "up to date"; exit 0; fi
+"$cc" -std=c11 -O2 -Wall -Wextra -Werror -o "bin/$name" src/*.c
+echo "built: bin/$name"

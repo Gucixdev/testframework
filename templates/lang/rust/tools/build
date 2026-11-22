@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# build - cargo build --release; BUILD_FORCE=1 cleans first. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+command -v cargo > /dev/null || { echo "build: cargo is missing" >&2; exit 1; }
+[ -z "${BUILD_FORCE:-}" ] || cargo clean -q
+cargo build --release -q && echo "built: target/release"

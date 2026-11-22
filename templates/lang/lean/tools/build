@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# build - lake build. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+export PATH=$HOME/.elan/bin:$PATH
+command -v lake > /dev/null || { echo "build: lake is missing (install elan)" >&2; exit 1; }
+lake build && echo "built: lake"

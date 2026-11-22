@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# check - shellcheck on every bash script, warnings and up. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+command -v shellcheck > /dev/null || { echo "check: shellcheck is missing" >&2; exit 1; }
+fail=0
+for f in src/* tools/*; do [ -f "$f" ] && head -1 "$f" | grep -q bash && { shellcheck -S warning "$f" || fail=1; }; done
+[ "$fail" = 0 ] && echo "ok   check"
+exit "$fail"

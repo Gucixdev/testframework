@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# build - go build into bin/NAME; BUILD_FORCE=1 rebuilds all. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+command -v go > /dev/null || { echo "build: go is missing" >&2; exit 1; }
+f=; [ -z "${BUILD_FORCE:-}" ] || f=-a
+# shellcheck disable=SC2086
+go build $f -o "bin/$(basename "$PWD")" ./src && echo "built: bin/$(basename "$PWD")"

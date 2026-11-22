@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# check - ruff when installed (else pyflakes, else compile only); mypy when installed. 0 arguments.
+set -u
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+fail=0
+if command -v ruff > /dev/null; then ruff check src test || fail=1
+elif python3 -c 'import pyflakes' 2> /dev/null; then python3 -m pyflakes src test || fail=1
+else python3 -I -m compileall -q src test || fail=1; fi
+command -v mypy > /dev/null && { mypy --strict src || fail=1; }
+[ "$fail" = 0 ] && echo "ok   check"
+exit "$fail"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# build - nothing to compile: byte-compile everything so syntax errors show up now. 0 arguments.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+python3 -I -m compileall -q src && echo "built: src (byte-compiled)"

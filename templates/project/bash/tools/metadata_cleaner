@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# metadata_cleaner - strip metadata (EXIF, author, GPS, camera tags) from
+# files before you share them.
+#
+# Uses mat2 or exiftool when installed, otherwise ffmpeg for audio/video
+# and ImageMagick for images. Always writes a new clean-NAME file next to
+# the original and never modifies the original.
+#
+# usage: metadata_cleaner FILE...
+
+case ${1:-} in -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;; esac
+
+[ $# -gt 0 ] || { echo "usage: metadata_cleaner FILE [FILE...]" >&2; exit 2; }
+
+td=
+trap 'rm -rf -- "$td"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# run the stripper on a copy next to the original; clean-NAME appears only when it succeeded
+clean_one() {
+	f=$1
+	[ -f "$f" ] || { echo "metadata_cleaner: no such file: $f" >&2; return 1; }
+	dir=$(dirname -- "$f"); base=$(basename -- "$f")
+	out="$dir/clean-$base"
+	if [ -e "$out" ] || [ -L "$out" ]; then echo "metadata_cleaner: $out already exists, skipping $f" >&2; return 1; fi
+	src=$f; case $f in -*) src=./$f ;; esac
+	td=$(mktemp -d "$dir/.metadata_cleaner.XXXXXX") || { echo "metadata_cleaner: cannot write in $dir" >&2; return 1; }
+	tmp="$td/$base"
+
+	rc=0
+	if command -v mat2 >/dev/null 2>&1; then
+		cp -- "$src" "$tmp" && mat2 --inplace "$tmp" || rc=1
+	elif command -v exiftool >/dev/null 2>&1; then
+		cp -- "$src" "$tmp" && exiftool -all= -overwrite_original "$tmp" >/dev/null || rc=1
+	else
+		mime=$(file --mime-type -b -- "$src" 2>/dev/null)
+		case "$mime" in
+			image/*)
+				if command -v magick >/dev/null 2>&1; then magick "$src" -strip "$tmp" || rc=1
+				elif command -v convert >/dev/null 2>&1; then convert "$src" -strip "$tmp" || rc=1
+				else echo "metadata_cleaner: need mat2, exiftool, or ImageMagick - none found" >&2; rc=1; fi
+				;;
+			video/*|audio/*)
+				if command -v ffmpeg >/dev/null 2>&1; then ffmpeg -nostdin -loglevel error -i "$src" -map_metadata -1 -c copy "$tmp" || rc=1
+				else echo "metadata_cleaner: need mat2, exiftool, or ffmpeg - none found" >&2; rc=1; fi
+				;;
+			*)
+				echo "metadata_cleaner: no stripper for '$mime' ($f) - install mat2 or exiftool for general coverage" >&2
+				rc=1
+				;;
+		esac
+	fi
+	if [ "$rc" -eq 0 ] && [ -e "$tmp" ] && mv -n -- "$tmp" "$out"; then
+		rm -rf -- "$td"; td=
+		echo "wrote $out"
+		return 0
+	fi
+	[ "$rc" -eq 0 ] || echo "metadata_cleaner: could not strip $f, no clean copy written" >&2
+	rm -rf -- "$td"; td=
+	return 1
+}
+
+status=0
+for f in "$@"; do clean_one "$f" || status=1; done
+exit $status

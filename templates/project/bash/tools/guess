@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# guess - run a command as if on a weaker device: cores via taskset, memory via systemd-run (else ulimit -v),
+# print the wall time per profile, and with PREDICT_MS=<ms> the ratio to guess.lean's estimate.
+#   guess PROFILE [PROFILE...] -- COMMAND [ARGS...]     PROFILE: deck rpi4 gtx1050ti desktop all, or CORESxMEM_MB (2x2048)
+# Profiles are the same figures as in guess.lean (cores, RAM+VRAM budget). Exit: command status of the last run, 2 usage.
+set -u
+declare -A cores=([deck]=8 [rpi4]=4 [gtx1050ti]=6 [desktop]=16)
+declare -A mem=([deck]=16384 [rpi4]=4096 [gtx1050ti]=16384 [desktop]=32768)
+usage() { sed -n '2,/^set/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2; }
+
+profiles=()
+while [ $# -gt 0 ] && [ "$1" != -- ]; do profiles+=("$1"); shift; done
+[ "${1:-}" = -- ] && shift
+[ ${#profiles[@]} -gt 0 ] && [ $# -gt 0 ] || usage
+[ "${profiles[0]}" = all ] && profiles=(rpi4 deck gtx1050ti desktop)
+
+have_sd=
+command -v systemd-run > /dev/null && systemd-run --user --scope -q true 2> /dev/null && have_sd=1
+total=$(nproc)
+rc=0
+for p in "${profiles[@]}"; do
+	if [ -n "${cores[$p]:-}" ]; then c=${cores[$p]} m=${mem[$p]}
+	elif [[ $p =~ ^([0-9]+)x([0-9]+)$ ]]; then c=${BASH_REMATCH[1]} m=${BASH_REMATCH[2]}
+	else echo "guess: unknown profile '$p'" >&2; usage; fi
+	[ "$c" -gt "$total" ] && c=$total	# cannot give more cores than this machine has
+	cpus=0-$((c - 1))
+	start=$(date +%s%N)
+	if [ -n "$have_sd" ]; then
+		systemd-run --user --scope -q -p "MemoryMax=${m}M" -p MemorySwapMax=0 taskset -c "$cpus" "$@" > /dev/null 2>&1
+	else
+		(ulimit -v $((m * 1024)); taskset -c "$cpus" "$@" > /dev/null 2>&1)
+	fi
+	rc=$?
+	ms=$((($(date +%s%N) - start) / 1000000))
+	line=$(printf '%-12s cores=%-3s mem=%-6sMB time=%6d ms rc=%d' "$p" "$c" "$m" "$ms" "$rc")
+	[ -n "${PREDICT_MS:-}" ] && line+=$(printf '  vs model %s ms (x%s)' "$PREDICT_MS" "$(awk -v a="$ms" -v b="$PREDICT_MS" 'BEGIN{printf "%.2f", b ? a / b : 0}')")
+	echo "$line"
+done
+exit "$rc"

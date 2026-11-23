@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# setup - install what the project needs, show the list first, ask once. 0 arguments (-y answers yes).
+# Template: copy to the project root as `setup`. Works on pacman, apt, dnf and xbps; unknown systems get the list to install by hand.
+set -u
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+
+# EDIT: one line per dependency: command|package on pacman|apt|dnf|xbps. One package column is enough when the name is the same
+# everywhere (cc|gcc); a - or an empty column means the first column, and a - there means the command itself.
+DEPS='git|git
+make|make
+cc|gcc
+shellcheck|shellcheck'
+
+yes_all=0
+for a in "$@"; do case $a in -y) yes_all=1 ;; *) echo "usage: setup [-y]" >&2; exit 2 ;; esac; done
+
+if   command -v pacman    >/dev/null; then inst='sudo pacman -S --needed' col=2
+elif command -v apt-get   >/dev/null; then inst='sudo apt-get install' col=3
+elif command -v dnf       >/dev/null; then inst='sudo dnf install' col=4
+elif command -v xbps-install >/dev/null; then inst='sudo xbps-install -S' col=5
+else inst='' col=2; fi
+
+missing=''
+while IFS='|' read -r cmd c2 c3 c4 c5; do
+	[ -n "$cmd" ] || continue
+	command -v "$cmd" >/dev/null 2>&1 && continue
+	# the column of this system's package manager; empty or - falls back to the first package column, then to the command
+	case $col in 2) pkg=$c2 ;; 3) pkg=${c3:-} ;; 4) pkg=${c4:-} ;; *) pkg=${c5:-} ;; esac
+	case $pkg in '' | -) pkg=$c2 ;; esac
+	case $pkg in '' | -) pkg=$cmd ;; esac
+	missing="$missing $pkg"
+done <<EOT
+$DEPS
+EOT
+missing=${missing# }
+[ -n "$missing" ] || { echo "setup: everything is installed"; exit 0; }
+
+[ -n "$inst" ] || { echo "setup: unknown package manager; install by hand: $missing"; exit 1; }
+
+echo "setup: will run: $inst $missing"
+if [ "$yes_all" -eq 0 ]; then
+	printf 'continue? [y/N] '; read -r a || exit 1
+	case $a in y | Y) ;; *) echo "setup: nothing done"; exit 1 ;; esac
+fi
+# shellcheck disable=SC2086   # $inst and $missing are word lists on purpose
+$inst $missing

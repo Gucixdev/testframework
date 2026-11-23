@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# requirements - install everything the project needs, by itself, from requirements.list. Run it again any time: it only does what is missing.
+#   requirements            install what is missing (prints each step; system packages go through sudo, which asks for the password itself)
+#   requirements check      change nothing, exit 1 when something is missing (for CI and for ./run to call)
+#   requirements list       what the file asks for and what is there
+#   requirements -n         show the commands, run none
+# Template: copy to the project root as `requirements` (no extension) and write requirements.list next to it, one need per line (# = comment):
+#   cmd NAME [pacman=PKG apt=PKG dnf=PKG xbps=PKG nix=ATTR]   a program on PATH; PKG defaults to NAME (e.g. `cmd cc pacman=gcc apt=gcc`)
+#   pc MODULE [pacman=PKG apt=PKG ...]               a library known to pkg-config (`pc freetype2 apt=libfreetype-dev`)
+#   pip PACKAGE[==VERSION]                           into ./.venv, never into the system
+#   npm PACKAGE[@VERSION]                            into ./node_modules, never global
+#   cargo CRATE [VERSION]                            into ./.local/bin (cargo install --root ./.local)
+#   go MODULE@VERSION                                into ./.local/bin (GOBIN)
+#   refs                                             run ./download_references when it exists (cloned projects studied by this repo)
+# Package managers: pacman, apt, dnf, xbps, and nix. The system one is used; REQ_PM=nix forces nix for everything
+# (`nix profile install nixpkgs#ATTR`, ATTR from nix=, default NAME). Whatever the distro has no name for but the line has
+# a nix= for (and nix is installed) goes through nix, so a missing package is not a dead end.
+# Exit: 0 all there, 1 missing (check) or an install failed, 2 usage. Unknown package manager: the list of packages to install by hand.
+set -u
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+list=requirements.list dry=0 mode=install
+for a in "$@"; do	# the mode and -n in any order: `requirements check -n`, `requirements -n install`
+	case $a in install) ;; check | list) mode=$a ;; -n) dry=1 ;; -h | --help) sed -n '2,/^# Exit/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; *) echo "requirements: unknown '$a' (requirements --help)" >&2; exit 2 ;; esac
+done
+[ -f "$list" ] || { echo "requirements: no $list here" >&2; exit 2; }
+
+PATH=$PWD/.local/bin:$PWD/.venv/bin:$HOME/.nix-profile/bin:$HOME/.elan/bin:$PATH; export PATH
+missing=0 failed=0 syspk='' nixpk='' handpk=''
+
+pm=${REQ_PM:-}
+if [ -z "$pm" ]; then for c in pacman apt-get dnf xbps-install; do command -v "$c" > /dev/null 2>&1 && { pm=$c; break; }; done; fi
+case $pm in pacman) key=pacman inst='sudo pacman -S --needed --noconfirm' ;; apt-get | apt) key=apt inst='sudo apt-get install -y' ;; dnf) key=dnf inst='sudo dnf install -y' ;; xbps-install | xbps) key=xbps inst='sudo xbps-install -y' ;; nix) key=nix inst='' ;; *) key='' inst='' ;; esac
+have_nix=0; command -v nix > /dev/null 2>&1 && have_nix=1
+
+say() { printf '%-7s %s\n' "$1" "$2"; }
+run() { # run a step: shown, skipped in dry mode, failure counted
+	say run "$*"
+	[ "$dry" -eq 1 ] || "$@" || { say FAILED "$*"; failed=1; }
+}
+
+# need KIND NAME REST: which package to install, and with what. `pacman=-` (any manager) says the distro has none:
+# then nix= is used when nix is installed, else the package is listed to install by hand.
+need() {
+	local pkg=$2 nix='' kv
+	for kv in $3; do
+		case $kv in "$key"=*) pkg=${kv#*=} ;; esac
+		case $kv in nix=*) nix=${kv#*=} ;; esac
+	done
+	say missing "$1 $2 (package $pkg)"
+	if [ "$key" = nix ]; then nixpk="$nixpk nixpkgs#$pkg"
+	elif [ "$pkg" = - ] && [ "$have_nix" = 1 ] && [ -n "$nix" ]; then nixpk="$nixpk nixpkgs#$nix"
+	elif [ "$pkg" = - ]; then handpk="$handpk $2"
+	else syspk="$syspk $pkg"; fi
+}
+
+while read -r kind name rest <&3 || [ -n "$kind" ]; do	# fd 3: a step must not eat the list from stdin; || : the last line may lack its newline
+	case $kind in '' | '#'*) continue ;; esac
+	case $kind in
+	cmd)
+		if command -v "$name" > /dev/null 2>&1; then [ "$mode" != list ] || say have "cmd $name"
+		else missing=1; need cmd "$name" "$rest"; fi ;;
+	pc)
+		if pkg-config --exists "$name" > /dev/null 2>&1; then [ "$mode" != list ] || say have "pc $name"
+		else missing=1; need pc "$name" "$rest"; fi ;;
+	pip)
+		base=${name%%[=<>~!;]*}; base=${base%%\[*}
+		if [ -x .venv/bin/pip ] && .venv/bin/pip show -q "$base" > /dev/null 2>&1; then [ "$mode" != list ] || say have "pip $name"
+		else missing=1; say missing "pip $name"; [ "$mode" != install ] || pips="${pips:-} $name"; fi ;;
+	npm)
+		base=$name; case $name in @*@*) base=${name%@*} ;; @*) ;; *@*) base=${name%@*} ;; esac
+		if [ -d "node_modules/$base" ]; then [ "$mode" != list ] || say have "npm $name"
+		else missing=1; say missing "npm $name"; [ "$mode" != install ] || npms="${npms:-} $name"; fi ;;
+	cargo)
+		if [ -x ".local/bin/$name" ] || grep -qF "\"$name " .local/.crates.toml 2> /dev/null; then [ "$mode" != list ] || say have "cargo $name"
+		else missing=1; say missing "cargo $name"; [ "$mode" != install ] || run cargo install --locked --root .local "$name" ${rest:+--version "$rest"}; fi ;;
+	go)
+		bin=$(basename "${name%@*}"); case $bin in v[0-9]*) bin=$(basename "$(dirname "${name%@*}")") ;; esac
+		if [ -x ".local/bin/$bin" ]; then [ "$mode" != list ] || say have "go $name"
+		else missing=1; say missing "go $name"; [ "$mode" != install ] || run env GOBIN="$PWD/.local/bin" go install "$name"; fi ;;
+	refs)
+		[ -x ./download_references ] || continue
+		if [ -d references ] && [ -n "$(ls -A references 2> /dev/null)" ]; then [ "$mode" != list ] || say have refs
+		else missing=1; say missing refs; [ "$mode" != install ] || run ./download_references; fi ;;
+	*) echo "requirements: $list: unknown kind '$kind'" >&2; exit 2 ;;
+	esac
+done 3< <(tr -d '\r' < "$list")
+
+case $mode in
+list) exit 0 ;;
+check) [ "$missing" -eq 0 ] && echo "requirements: all there" || exit 1; exit 0 ;;
+esac
+[ "$missing" -eq 1 ] || { echo "requirements: everything is installed"; exit 0; }
+
+if [ -n "${syspk# }" ]; then
+	if [ -n "$inst" ]; then run $inst ${syspk# }
+	else say hand "no known package manager; install by hand:${syspk}"; failed=1; fi
+fi
+[ -z "${handpk# }" ] || { say hand "no package for your system, install by hand:$handpk"; failed=1; }
+if [ -n "${nixpk# }" ]; then
+	if [ "$have_nix" = 1 ]; then run nix --extra-experimental-features 'nix-command flakes' profile install ${nixpk# }
+	else say hand "nix is not installed; install it, or by hand:${nixpk}"; failed=1; fi
+fi
+if [ -n "${pips:-}" ]; then
+	[ -x .venv/bin/pip ] || run python3 -m venv .venv
+	# shellcheck disable=SC2086  # the list is a set of words on purpose
+	run .venv/bin/pip install -q $pips
+fi
+# shellcheck disable=SC2086
+[ -z "${npms:-}" ] || run npm install --no-audit --no-fund --ignore-scripts --prefix . $npms
+[ "$failed" -eq 0 ] && echo "requirements: done" || { echo "requirements: something failed (see FAILED above)" >&2; exit 1; }

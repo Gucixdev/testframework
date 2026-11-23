@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# settings - per-app key/value settings for shell scripts.
+#
+# usage: settings get APP KEY [DEFAULT]    print the value (exit 1 when unset and no DEFAULT)
+#        settings set APP KEY VALUE...     store a value
+#        settings unset APP KEY
+#        settings list APP                 KEY=VALUE lines, sorted
+#        settings export APP               eval-able APP_KEY='value' lines
+#        settings path APP                 where the file is
+#
+# One plain file per app, ${XDG_CONFIG_HOME:-~/.config}/APP/settings (or
+# $SETTINGS_HOME/APP/settings), KEY=VALUE per line, # comments kept. The
+# file is parsed, never sourced, so it cannot run code. It is written
+# atomically and with mode 600, since settings often hold tokens.
+# `get` lets an environment variable win: APP_KEY, upper-cased, so a
+# one-off override needs no edit of the file.
+
+case ${1:-} in -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;; esac
+
+die() { echo "settings: $*" >&2; exit 2; }
+
+cmd=${1:-}
+[ $# -ge 2 ] || die "usage: settings get|set|unset|list|export|path APP [KEY] [VALUE]"
+app=$2
+shift 2
+case $app in '' | *[!A-Za-z0-9._-]*) die "bad app name '$app'" ;; esac
+
+base=${SETTINGS_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}
+file=$base/$app/settings
+
+need_key() {
+	[ $# -ge 1 ] || die "$cmd needs a KEY"
+	case $1 in '' | *[!A-Za-z0-9._-]*) die "bad key '$1'" ;; esac
+}
+
+# env name for APP_KEY: upper-case, anything but a letter or digit becomes _
+envname() { printf '%s_%s' "$app" "$1" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9\n' '_'; }
+
+lookup() {   # KEY -> last value in the file, exit 1 when absent
+	[ -r "$file" ] || return 1
+	awk -v k="$1" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2); found = 1 } END { if (!found) exit 1; print v }' "$file"
+}
+
+case $cmd in
+get)
+	need_key "$@"
+	key=$1
+	ev=$(envname "$key")
+	eval "set_=\${$ev+x}"
+	if [ -n "$set_" ]; then
+		eval "printf '%s\\n' \"\$$ev\""
+		exit 0
+	fi
+	if v=$(lookup "$key"); then
+		printf '%s\n' "$v"
+	elif [ $# -ge 2 ]; then
+		printf '%s\n' "$2"
+	else
+		exit 1
+	fi
+	;;
+set | unset)
+	need_key "$@"
+	key=$1
+	shift
+	if [ "$cmd" = set ]; then
+		[ $# -ge 1 ] || die "set needs a VALUE"
+		val="$*"
+		case $val in *'
+'*) die "values are one line" ;; esac
+	fi
+	mkdir -p "$base/$app" || exit 1
+	umask 077
+	tmp=$(mktemp "$base/$app/.settings.XXXXXX") || exit 1
+	trap 'rm -f "$tmp"' EXIT INT TERM
+	if [ -r "$file" ]; then
+		awk -v k="$key" 'index($0, k "=") != 1' "$file" > "$tmp"
+	fi
+	[ "$cmd" = set ] && printf '%s=%s\n' "$key" "$val" >> "$tmp"
+	chmod 600 "$tmp"
+	mv -f "$tmp" "$file"
+	;;
+list)
+	[ -r "$file" ] || exit 0
+	grep -v '^[[:space:]]*#' "$file" | grep '=' | sort -t= -k1,1 -s | awk -F= '{ k = $1; sub(/^[^=]*=/, ""); last[k] = $0 } END { for (k in last) print k "=" last[k] }' | sort
+	;;
+export)
+	[ -r "$file" ] || exit 0
+	"$0" list "$app" | while IFS= read -r line; do
+		key=${line%%=*}
+		val=${line#*=}
+		printf "%s='%s'\n" "$(envname "$key")" "$(printf '%s' "$val" | sed "s/'/'\\\\''/g")"
+	done
+	;;
+path)
+	printf '%s\n' "$file"
+	;;
+*)
+	die "unknown command '$cmd' (get, set, unset, list, export, path)"
+	;;
+esac

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# download_references - download the projects this repo studies into ./references/, so the folder can be thrown away and fetched again.
+#   download_references [get]       fetch every project in references.list that is not there yet (shallow, one commit)
+#   download_references update      fetch again what is there (git pull --ff-only), then what is missing
+#   download_references list        name, state, size, source
+#   download_references clean [NAME] move ./references (or ./references/NAME) to the trash; nothing is deleted
+# Template: copy to the project root as `download_references` (no extension) and write references.list next to it:
+#   NAME URL [REF]         one project per line, REF = tag or branch (default: the default branch); # starts a comment
+# ./references/ is only a cache of other people's code: it is added to .gitignore, never committed, never edited.
+# Environment: REFERENCES_JOBS (4 parallel clones), REFERENCES_TRASH (default ~/.local/share/Trash/files).
+# Exit: 0 fine, 1 some project failed, 2 usage.
+set -u
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+list=references.list dir=references
+jobs=${REFERENCES_JOBS:-4}
+
+die() { printf 'download_references: %s\n' "$*" >&2; exit 2; }
+command -v git > /dev/null || die "git is missing"
+
+rows() { # NAME URL REF, comments and blanks dropped, names checked
+	[ -f "$list" ] || die "no $list here (one line per project: NAME URL [REF])"
+	local n u r
+	while read -r n u r _ || [ -n "$n" ]; do	# the last line may lack its newline
+		case $n in '' | '#'*) continue ;; esac
+		[[ $n =~ ^[A-Za-z0-9._-]+$ && $n != . && $n != .. && -n $u ]] || die "$list: bad line '$n $u'"
+		printf '%s\t%s\t%s\n' "$n" "$u" "${r:-}"
+	done < "$list"
+}
+
+ignore() { # keep the cache out of git
+	[ -d .git ] || return 0
+	grep -qxF "/$dir/" .gitignore 2> /dev/null && return 0
+	[ ! -s .gitignore ] || [ -z "$(tail -c 1 .gitignore)" ] || echo >> .gitignore	# a last line without its newline
+	printf '/%s/\n' "$dir" >> .gitignore
+}
+
+fetch_one() { # NAME URL REF
+	local n=$1 u=$2 r=$3 out
+	if [ -d "$dir/$n/.git" ]; then
+		[ "${MODE:-get}" = update ] || { echo "have     $n"; return 0; }
+		out=$(git -C "$dir/$n" pull --ff-only -q 2>&1) && echo "updated  $n" || { echo "FAILED   $n: $(printf '%s' "$out" | tail -n 1)"; return 1; }
+		return 0
+	fi
+	if [ -e "$dir/$n.part" ]; then	# left by a run that was interrupted: out of the way, it would fail every clone
+		mv "$dir/$n.part" "$dir/$n.failed.$$.stale" 2> /dev/null || { echo "FAILED   $n: cannot move aside $dir/$n.part"; return 1; }
+	fi
+	out=$(git clone -q --depth 1 ${r:+--branch "$r"} -- "$u" "$dir/$n.part" 2>&1) \
+		&& mv "$dir/$n.part" "$dir/$n" && echo "fetched  $n ($(du -sh "$dir/$n" | cut -f1))" \
+		|| { echo "FAILED   $n: $(printf '%s' "$out" | tail -n 1)"; mv "$dir/$n.part" "$dir/$n.failed.$$" 2> /dev/null; return 1; }
+}
+
+get() {
+	local n u r running=0 fail=0 tmp rf; rf=$(mktemp)
+	rows > "$rf" || { rm -f "$rf"; exit 2; }
+	mkdir -p "$dir" && ignore
+	tmp=$(mktemp)
+	while IFS=$'\t' read -r n u r; do
+		MODE=$1 fetch_one "$n" "$u" "$r" >> "$tmp" || echo "$n" >> "$tmp.fail" &
+		running=$((running + 1))
+		[ "$running" -lt "$jobs" ] || { wait -n; running=$((running - 1)); }
+	done < "$rf"
+	wait
+	sort -k2 "$tmp"; [ -f "$tmp.fail" ] && fail=1
+	rm -f "$tmp" "$tmp.fail" "$rf"
+	[ "$fail" -eq 0 ]
+}
+
+case ${1:-get} in
+get) get get ;;
+update) get update ;;
+list)
+	rf=$(mktemp); rows > "$rf" || { rm -f "$rf"; exit 2; }
+	while IFS=$'\t' read -r n u r; do
+		if [ -d "$dir/$n/.git" ]; then s=here; z=$(du -sh "$dir/$n" | cut -f1); else s=missing; z=-; fi
+		printf '%-22s %-8s %-6s %s%s\n' "$n" "$s" "$z" "$u" "${r:+ @ $r}"
+	done < "$rf"; rm -f "$rf" ;;
+clean)
+	t=${REFERENCES_TRASH:-$HOME/.local/share/Trash/files}; mkdir -p "$t"
+	src=$dir; [ -z "${2:-}" ] || { [[ $2 =~ ^[A-Za-z0-9._-]+$ && $2 != . && $2 != .. ]] || die "bad name '$2'"; src=$dir/$2; }
+	[ -e "$src" ] || { echo "download_references: nothing at $src"; exit 0; }
+	mv "$src" "$t/references-$(basename "$src")-$(date +%Y%m%d-%H%M%S)" && echo "moved $src to $t" ;;
+*) sed -n '2,/^set/p' "$0" | sed '$d;s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# misrac-scan - which MISRA C:2012 rules does this C code break, as far as a pattern can tell? Prints one line per
+# finding (file:line: rule class: the code) and a summary. Comments and the insides of strings are blanked first, so a
+# rule does not fire on prose. Rules checked: 21.3 dynamic memory, 21.4 setjmp, 21.5 signal, 21.6 stdio, 21.7 atoi and
+# atof, 21.8 abort/exit/getenv/system, 21.9 qsort/bsearch, 21.10 time.h, 17.1 stdarg (all "required"); 15.1 goto,
+# 19.2 union, 20.5 #undef ("advisory"). Rules that need a real analyser (recursion 17.2, types, dead code) are not
+# checked, so a clean result is not a MISRA claim. cppcheck's misra addon runs too when cppcheck is installed.
+#   tools/misrac-scan [-q] [-m MAX] PATH...      PATH: .c/.h files or folders (searched for them)
+#   -q        the summary line only
+#   -m MAX    exit 1 when more than MAX "required" findings (default: report, exit 0)
+# Exit: 0 ok, 1 over MAX, 2 usage.
+set -uo pipefail
+quiet=0 max=""
+while getopts qm:h o; do case $o in
+	q) quiet=1 ;; m) max=$OPTARG ;;
+	h) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
+	*) exit 2 ;; esac; done
+shift $((OPTIND - 1))
+(( $# >= 1 )) || { echo "usage: tools/misrac-scan [-q] [-m MAX] PATH..." >&2; exit 2; }
+[[ -z $max || $max =~ ^[0-9]+$ ]] || { echo "misrac-scan: -m wants a number" >&2; exit 2; }
+
+# rule|class|pattern
+RULES='21.3|required|\b(malloc|calloc|realloc|free)[[:space:]]*\(
+21.4|required|\b(setjmp|longjmp)\b|<setjmp\.h>
+21.5|required|<signal\.h>|\b(signal|raise)[[:space:]]*\(
+21.6|required|<stdio\.h>|\b(printf|fprintf|sprintf|snprintf|scanf|sscanf|fopen|fclose|fread|fwrite|fgets|fputs|puts|putchar|getchar)[[:space:]]*\(
+21.7|required|\b(atoi|atol|atoll|atof)[[:space:]]*\(
+21.8|required|\b(abort|exit|getenv|system)[[:space:]]*\(
+21.9|required|\b(bsearch|qsort)[[:space:]]*\(
+21.10|required|<time\.h>|\b(time|clock|strftime)[[:space:]]*\(
+17.1|required|<stdarg\.h>|\bva_(start|arg|end|copy)\b
+15.1|advisory|\bgoto\b
+19.2|advisory|\bunion\b
+20.5|advisory|^[[:space:]]*#[[:space:]]*undef\b'
+
+mapfile -t files < <(find "$@" -type f \( -name '*.c' -o -name '*.h' \) 2> /dev/null | sort)
+(( ${#files[@]} )) || { echo "misrac-scan: no .c or .h file under: $*" >&2; exit 2; }
+
+# the file with comments and string contents blanked, line for line (the linemarkers of -E give the numbers, so a
+# skipped stretch becomes blank lines and `grep -n` of the result names the real line)
+strip() {
+	{ gcc -fpreprocessed -dD -E "$1" 2> /dev/null || cat "$1"; } | sed -E 's/"([^"\\]|\\.)*"/""/g' |
+		awk 'BEGIN { ln = 0 } /^# [0-9]+ "/ { while (ln < $2 - 1) { print ""; ln++ } next } { ln++; print }'
+}
+
+req=0 adv=0 hits=""
+declare -A count
+for f in "${files[@]}"; do
+	text=$(strip "$f")
+	while IFS='|' read -r rule class pat; do
+		found=$(grep -nE "$pat" <<< "$text") || continue
+		while IFS=: read -r ln code; do
+			(( quiet )) || printf '%s:%s: %s %s: %s\n' "$f" "$ln" "$rule" "$class" "$(sed -E 's/^[[:space:]]+//' <<< "$code" | cut -c1-90)"
+			count[$rule]=$(( ${count[$rule]:-0} + 1 ))
+			[[ $class == required ]] && req=$((req + 1)) || adv=$((adv + 1))
+		done <<< "$found"
+	done <<< "$RULES"
+done
+for rule in $(printf '%s\n' "${!count[@]}" | sort -V); do hits="$hits $rule:${count[$rule]}"; done
+extra=""
+if command -v cppcheck > /dev/null; then
+	extra="; cppcheck misra addon: $(cppcheck --addon=misra --quiet --inline-suppr "$@" 2>&1 | grep -c 'misra-c2012')"
+fi
+echo "misra: $req required, $adv advisory in ${#files[@]} files;${hits:- none}$extra"
+[[ -n $max ]] && (( req > max )) && exit 1
+exit 0

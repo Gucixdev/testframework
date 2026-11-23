@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# bench - time a command N times and print min / median / mean / max in milliseconds.
+# Template: copy to the project root as `bench` (no extension). Run: ./bench [-n RUNS] [--] COMMAND [ARGS]
+# With no command it benchmarks the EDIT line below. Output goes to stdout as one TSV row per statistic.
+set -u
+case ${1:-} in -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;; esac
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+RUNS=${RUNS:-10}
+[ "${1:-}" = -n ] && { RUNS=${2:?-n needs a number}; shift 2; }
+[ "${1:-}" = -- ] && shift
+[ $# -gt 0 ] || set -- ./run --version                # EDIT: what to measure when called without a command
+case $RUNS in '' | *[!0-9]* | 0) echo "bench: RUNS must be a positive number" >&2; exit 2 ;; esac
+command -v "$1" > /dev/null 2>&1 || [ -x "$1" ] || { echo "bench: $1 is not runnable" >&2; exit 1; }
+
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp"' EXIT
+i=0 bad=0
+while [ "$i" -lt "$RUNS" ]; do
+	a=$(date +%s%N)
+	"$@" > /dev/null 2>&1 || bad=$((bad + 1))
+	b=$(date +%s%N)
+	echo $(((b - a) / 1000000)) >> "$tmp"
+	i=$((i + 1))
+done
+sort -n "$tmp" | awk '{ v[NR] = $1; s += $1 }
+	END { printf "runs\t%d\nmin\t%d\nmedian\t%d\nmean\t%.1f\nmax\t%d\n", NR, v[1], v[int((NR + 1) / 2)], s / NR, v[NR] }'
+# a command that fails (a typo in the arguments, a missing file) is not worth timing
+[ "$bad" -eq 0 ] || { echo "bench: $bad of $RUNS runs exited non-zero: the numbers above time a failure" >&2; exit 1; }

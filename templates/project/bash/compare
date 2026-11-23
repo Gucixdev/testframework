@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# compare - show how two things differ: two files, two directories, or the output of two commands.
+# Template: copy to the project root as `compare` (no extension).
+#   ./compare A B                 files or directories (directories: names only on one side, then changed files)
+#   ./compare -c 'CMD1' 'CMD2'    compare what two shell commands print
+# Exit 0 = identical, 1 = different, 2 = usage / missing input. Read-only: it changes nothing.
+set -u
+case ${1:-} in -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;; esac
+orig=$PWD
+cd "$(dirname "$(readlink -f "$0")")" || exit 1   # -c commands run from the project root, like ./run does
+
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT
+
+if [ "${1:-}" = -c ]; then
+	[ $# -eq 3 ] || { echo "usage: compare -c 'CMD1' 'CMD2'" >&2; exit 2; }
+	bash -c "$2" > "$tmp/a" 2>&1
+	bash -c "$3" > "$tmp/b" 2>&1
+	set -- "$tmp/a" "$tmp/b"
+fi
+[ $# -eq 2 ] || { echo "usage: compare A B | compare -c CMD1 CMD2" >&2; exit 2; }
+for _i in 1 2; do	# A and B are named relative to where the user stands, not to the project root
+	case $1 in /*) ;; *) set -- "$orig/$1" "${@:2}" ;; esac
+	set -- "${@:2}" "$1"
+done
+[ -e "$1" ] || { echo "compare: no such path: $1" >&2; exit 2; }
+[ -e "$2" ] || { echo "compare: no such path: $2" >&2; exit 2; }
+
+if [ -d "$1" ] && [ -d "$2" ]; then
+	diff -rq -- "$1" "$2"
+elif command -v git > /dev/null 2>&1; then
+	git diff --no-index --stat --color=auto -- "$1" "$2" && echo "identical" && exit 0   # stat first, then the lines
+	git diff --no-index --color=auto -- "$1" "$2"
+	exit 1
+else
+	diff -u -- "$1" "$2" && echo "identical" && exit 0
+	exit 1
+fi

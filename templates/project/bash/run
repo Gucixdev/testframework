@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# run - build NAME if needed and start it. 0 arguments (extra arguments go to NAME).
+# Template: copy to the project root as `run` (no extension), set APP, replace the build line. Idempotent: running it twice is safe.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+APP=${APP:-NAME}                                   # EDIT: the program this project starts
+[ -x ./build ] && ./build >/dev/null               # EDIT: or `cargo build --release --quiet` / `make -s`
+exec "./bin/$APP" "$@"                             # EDIT: ./target/release/$APP, python3 -m $APP, ...

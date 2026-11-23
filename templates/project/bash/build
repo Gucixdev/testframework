@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# build - compile the project into bin/. 0 arguments. Safe to run again: it only redoes what is missing.
+# Template: copy to the project root as `build`. Sources of third-party tools are cloned into src/ (not tracked), results go to bin/.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+
+die() { printf 'build: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null || die "$1 is missing (install: ${2:-your package manager})"; }
+
+need make                                          # EDIT: the compilers and tools this project needs
+need cc gcc
+mkdir -p bin src
+
+# a third-party tool: clone once, build, copy the result into bin/
+# [ -d src/tool ] || git clone -q --depth 1 https://github.com/OWNER/tool src/tool
+# make -C src/tool >/dev/null 2>&1 || true         # build errors in optional parts must not stop us ...
+# [ -x src/tool/tool ] || die "tool failed to build"   # ... but a missing result must
+# cp src/tool/tool bin/
+
+make -s                                            # EDIT: the project's own build
+
+echo "built: $(ls bin | tr '\n' ' ')"

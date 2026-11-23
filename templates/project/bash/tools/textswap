@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+# textswap - privacy filter for pictures and video: swaps part of the words in an image or clip for random Chinese
+# characters, so a screenshot can be shared without its text being legible. The original is never touched.
+#
+# usage: textswap [options] FILE...
+#   FILE            an image (png jpg webp bmp ...) or a video (mp4 mkv webm mov avi m4v)
+#   -o OUT          output file (one input only); default NAME.swapped.EXT (videos: NAME.swapped.mp4, or .webm)
+#   -f              overwrite OUT if it exists (the input itself is never overwritten, not even with -f)
+#   --ratio R       fraction of the words to swap, 0..1 (default 0.5; 1 = every word, 0 = none)
+#   --seed N        same seed, same picture, byte for byte (default 0)
+#   --boxes FILE    word boxes from a file instead of OCR, one per line: x y w h [text] (tab or space separated,
+#                   # starts a comment); in a video the same boxes are used on every frame. Wins over tesseract.
+#   --pad N         grow every word box by N pixels before painting (default 1; tesseract boxes are tight)
+#   --font PATH     a font with CJK glyphs (default: the first Noto Sans CJK / WenQuanYi / Droid Sans Fallback ...
+#                   that `fc-list :lang=zh` lists)
+#   --lang L        tesseract language(s), e.g. pol+eng (default: tesseract's own default, eng)
+#   --min-conf N    ignore OCR words below confidence N (default 10; lower = more words, safer for privacy)
+#   --fps N         video: frames per second to process and write (default 2)
+#   --long          video: allow clips longer than 120 s
+#   -v              say which characters replaced which box
+#   -h, --help      this text
+#
+# How a word is swapped: the box is painted with the local background colour (median of the pixels just outside the
+# box), then random Chinese characters of the same overall size are drawn in the colour the text had. Only pixels
+# inside the (padded) boxes change. Characters the font cannot draw (empty or the "missing glyph" box) are skipped.
+#
+# Words: tesseract (`tesseract IMG - tsv`, word boxes with confidence) when installed, or --boxes. No OCR and no
+# boxes file: exit 3 with how to get tesseract (docs/textswap.md has a ready container recipe). Env TEXTSWAP_TESSERACT
+# names another OCR binary with the same command line. Needs python3 with Pillow; ffmpeg + ffprobe for video.
+#
+# Video: frames are cut out at --fps, swapped one by one, and put back with the original audio. The output is at
+# --fps, NOT at the source frame rate (said out loud when lower). The same word keeps the same characters on
+# neighbouring frames: the choice is seeded from the word's position on a 12 px grid, so OCR jitter does not flicker.
+# Limits: 120 s unless --long. Pictures with an EXIF rotation tag: OCR and output both use the stored pixel
+# orientation and the tag is dropped, so rotate first (the tool warns).
+#
+# This hides text from people and from casual OCR; it is not a guarantee against someone who can undo the pixels
+# (the painted area is replaced, not blurred, so nothing underneath survives in the output).
+#
+# Exit status: 0 ok, 1 failed (OCR error, unreadable file, output exists), 2 usage, 3 tool or font missing
+# (tesseract and no --boxes, no CJK font, no python3/Pillow, no ffmpeg for video).
+
+case ${1:-} in -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;; esac
+
+die() { echo "textswap: $2" >&2; exit "$1"; }
+have() { command -v "$1" > /dev/null 2>&1; }
+
+PY=$(
+	cat << 'PYEOF'
+import argparse, hashlib, os, random, sys
+from PIL import Image, ImageDraw, ImageFont
+
+
+def die(code, msg):
+    print("textswap: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def read_boxes(path, kind, minconf):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    out = []
+    if kind == "tsv":
+        if not lines:
+            return out
+        head = lines[0].split("\t")
+        ix = {n: i for i, n in enumerate(head)}
+        for n in ("level", "left", "top", "width", "height", "conf", "text"):
+            if n not in ix:
+                die(1, "OCR output has no '%s' column" % n)
+        for ln in lines[1:]:
+            c = ln.split("\t")
+            c += [""] * (len(head) - len(c))
+            try:
+                if int(c[ix["level"]]) != 5:
+                    continue
+                conf = float(c[ix["conf"]])
+                x, y = int(float(c[ix["left"]])), int(float(c[ix["top"]]))
+                w, h = int(float(c[ix["width"]])), int(float(c[ix["height"]]))
+            except ValueError:
+                continue
+            if not c[ix["text"]].strip() or conf < minconf or w <= 0 or h <= 0:
+                continue
+            out.append((x, y, w, h, c[ix["text"]].strip()))
+    else:
+        for n, ln in enumerate(lines, 1):
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            parts = ln.split("\t") if "\t" in ln else ln.split(None, 4)
+            try:
+                x, y, w, h = (int(float(p)) for p in parts[:4])
+            except ValueError:
+                die(1, "%s line %d: expected 'x y w h [text]'" % (path, n))
+            if w > 0 and h > 0:
+                out.append((x, y, w, h, parts[4] if len(parts) > 4 else ""))
+    return out
+
+
+def key(seed, x, y, q):
+    d = hashlib.blake2b(("%s:%d:%d" % (seed, x // q, y // q)).encode(), digest_size=16).digest()
+    return int.from_bytes(d, "big")
+
+
+def median(v):
+    v = sorted(v)
+    return v[len(v) // 2]
+
+
+def dist(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
+
+
+def background(px, W, H, x0, y0, x1, y1):
+    gx0, gy0, gx1, gy1 = max(0, x0 - 1), max(0, y0 - 1), min(W, x1 + 1), min(H, y1 + 1)
+    pts = []
+    for x in range(gx0, gx1):
+        pts += [px[x, gy0], px[x, gy1 - 1]]
+    for y in range(gy0 + 1, gy1 - 1):
+        pts += [px[gx0, y], px[gx1 - 1, y]]
+    return tuple(median([p[i] for p in pts]) for i in range(3))
+
+
+def ink(px, x0, y0, x1, y1, bg):
+    ds = []
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            p = px[x, y]
+            ds.append((dist(p, bg), p))
+    top = max(d for d, _ in ds)
+    if top >= 60:
+        cut = top * 0.6
+        pts = [p for d, p in ds if d >= cut]
+        return tuple(median([p[i] for p in pts]) for i in range(3))
+    lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+    return (0, 0, 0) if lum > 127 else (255, 255, 255)
+
+
+class Glyphs:
+    def __init__(self, path):
+        self.path = path
+        self.fonts = {}
+        self.ok = {}
+        self.blank = None
+        try:
+            probe = self.font(32)
+        except OSError as e:
+            die(3, "cannot open font %s: %s" % (path, e))
+        self.blank = self.render(probe, chr(0x10FFFE))
+
+    def font(self, size):
+        if size not in self.fonts:
+            self.fonts[size] = ImageFont.truetype(self.path, size)
+        return self.fonts[size]
+
+    @staticmethod
+    def render(font, ch):
+        im = Image.new("L", (64, 64), 0)
+        ImageDraw.Draw(im).text((8, 8), ch, font=font, fill=255)
+        return im.tobytes() if im.getbbox() else b""
+
+    def usable(self, ch):
+        if ch not in self.ok:
+            r = self.render(self.font(32), ch)
+            self.ok[ch] = bool(r) and r != self.blank
+        return self.ok[ch]
+
+    def pick(self, rng, n):
+        out = []
+        tries = 0
+        while len(out) < n:
+            tries += 1
+            if tries > 500:
+                die(3, "font %s has no usable CJK glyphs; install a CJK font (see textswap --help)" % self.path)
+            ch = chr(rng.randint(0x4E00, 0x9FA5))
+            if self.usable(ch):
+                out.append(ch)
+        return "".join(out)
+
+
+def swap(a):
+    if not os.path.exists(a.input):
+        die(1, "no such file: " + a.input)
+    try:
+        im = Image.open(a.input)
+        im.load()
+    except Exception as e:  # Pillow raises many kinds
+        die(1, "cannot read %s as an image: %s" % (a.input, e))
+    try:
+        if im.getexif().get(274, 1) != 1:
+            print("textswap: warning: %s has an EXIF rotation tag; pixels stay in stored orientation" % a.input, file=sys.stderr)
+    except Exception:
+        pass
+    alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+    im = im.convert("RGBA" if alpha else "RGB")
+    W, H = im.size
+    px = im.load()
+    glyphs = Glyphs(a.font)
+    glyphs.pick(random.Random(0), 1)  # fails early (exit 3) when the font has no CJK at all
+
+    boxes = read_boxes(a.boxes_file, a.kind, a.min_conf) if a.boxes_file else []
+    keyed = sorted(((key(a.seed, b[0], b[1], a.quant), i, b) for i, b in enumerate(boxes)), key=lambda t: (t[0], t[1]))
+    if a.quant == 1:  # a picture: exactly round(ratio * words) words
+        chosen = keyed[: int(a.ratio * len(keyed) + 0.5)]
+    else:  # a video frame: a stable per-word coin, so neighbouring frames agree
+        chosen = [t for t in keyed if (t[0] % 1000000) / 1000000.0 < a.ratio]
+
+    for k, _, (bx, by, bw, bh, _t) in chosen:
+        x0, y0 = max(0, bx - a.pad), max(0, by - a.pad)
+        x1, y1 = min(W, bx + bw + a.pad), min(H, by + bh + a.pad)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        pw, ph = x1 - x0, y1 - y0
+        bg = background(px, W, H, x0, y0, x1, y1)
+        fg = ink(px, x0, y0, x1, y1, bg)
+        n = max(1, int(round(bw / float(bh))))
+        text = glyphs.pick(random.Random(k), n)
+        fill = (bg + (255,)) if alpha else bg
+        patch = Image.new(im.mode, (pw, ph), fill)
+        d = ImageDraw.Draw(patch)
+        cw = pw / float(n)
+        font = glyphs.font(max(6, int(min(cw, ph) * 0.9)))
+        ffill = (fg + (255,)) if alpha else fg
+        for i, ch in enumerate(text):
+            d.text((cw * (i + 0.5), ph / 2.0), ch, font=font, fill=ffill, anchor="mm")
+        im.paste(patch, (x0, y0))
+        if a.verbose:
+            print("textswap: box %d,%d %dx%d %r -> %s" % (bx, by, bw, bh, _t, text), file=sys.stderr)
+
+    ext = os.path.splitext(a.output)[1].lower()
+    try:
+        if ext in (".jpg", ".jpeg"):
+            im.convert("RGB").save(a.output, format="JPEG", quality=95)
+        else:
+            im.save(a.output)
+    except Exception as e:
+        die(1, "cannot write %s: %s" % (a.output, e))
+    if not a.quiet:
+        print("textswap: swapped %d of %d words -> %s" % (len(chosen), len(boxes), a.output))
+
+
+p = argparse.ArgumentParser(prog="textswap")
+p.add_argument("input")
+p.add_argument("output")
+p.add_argument("--boxes-file")
+p.add_argument("--kind", choices=("tsv", "boxes"), default="boxes")
+p.add_argument("--ratio", type=float, default=0.5)
+p.add_argument("--seed", default="0")
+p.add_argument("--font", required=True)
+p.add_argument("--pad", type=int, default=1)
+p.add_argument("--quant", type=int, default=1)
+p.add_argument("--min-conf", type=float, default=10)
+p.add_argument("-v", dest="verbose", action="store_true")
+p.add_argument("--quiet", action="store_true")
+swap(p.parse_args())
+PYEOF
+)
+
+# find_font: print the path of a font with Chinese glyphs, or nothing
+find_font() {
+	local f
+	if have fc-list; then
+		# prefer Sans, plain weight, over Serif, Light, Bold ...
+		f=$(fc-list :lang=zh -f '%{file}|%{style}|%{family}\n' 2> /dev/null | awk -F'|' '
+			function score(s,   n) { n = 0; if ($3 ~ /Sans/) n += 4; if ($3 ~ /Serif/) n -= 2; if ($2 ~ /Regular/) n += 2;
+				if ($2 ~ /Light|Thin|Black|Bold/) n -= 1; if ($1 ~ /\.(ttf|ttc|otf)$/) n += 1; return n }
+			$1 != "" { s = score(); if (!seen || s > best) { best = s; pick = $1; seen = 1 } }
+			END { if (seen) print pick }')
+		[ -n "$f" ] && { printf '%s\n' "$f"; return; }
+	fi
+	local d
+	# shellcheck disable=SC2086  # the dir list is words on purpose
+	for d in ${TEXTSWAP_FONTDIRS:-/usr/share/fonts /usr/local/share/fonts $HOME/.local/share/fonts $HOME/.fonts}; do
+		[ -d "$d" ] || continue
+		f=$(find "$d" -type f \( -iname '*CJK*' -o -iname '*wqy*' -o -iname 'DroidSansFallback*' -o -iname '*SourceHan*' \
+			-o -iname '*WenQuanYi*' \) 2> /dev/null | sort | head -n 1)
+		[ -n "$f" ] && { printf '%s\n' "$f"; return; }
+	done
+}
+
+TMP=''
+cleanup() { [ -n "$TMP" ] && rm -rf -- "$TMP"; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+files=() out='' force=0 ratio=0.5 seed=0 boxes='' pad=1 font='' lang='' minconf=10 fps=2 long=0 verbose=0 quant=''
+usage() { echo "usage: textswap [-o OUT] [-f] [--ratio R] [--seed N] [--boxes FILE] [--font PATH] [--fps N] [--long] FILE... (textswap --help)" >&2; exit 2; }
+isnum() { printf '%s' "$1" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; }
+while [ $# -gt 0 ]; do
+	case $1 in
+	-o) [ $# -ge 2 ] || usage; out=$2; shift 2 ;;
+	-f) force=1; shift ;;
+	--ratio) [ $# -ge 2 ] || usage; ratio=$2; shift 2 ;;
+	--seed) [ $# -ge 2 ] || usage; seed=$2; shift 2 ;;
+	--boxes) [ $# -ge 2 ] || usage; boxes=$2; shift 2 ;;
+	--pad) [ $# -ge 2 ] || usage; pad=$2; shift 2 ;;
+	--font) [ $# -ge 2 ] || usage; font=$2; shift 2 ;;
+	--lang) [ $# -ge 2 ] || usage; lang=$2; shift 2 ;;
+	--min-conf) [ $# -ge 2 ] || usage; minconf=$2; shift 2 ;;
+	--fps) [ $# -ge 2 ] || usage; fps=$2; shift 2 ;;
+	--quant) [ $# -ge 2 ] || usage; quant=$2; shift 2 ;;
+	--long) long=1; shift ;;
+	-v) verbose=1; shift ;;
+	--) shift; break ;;
+	-*) echo "textswap: unknown option $1" >&2; usage ;;
+	*) files+=("$1"); shift ;;
+	esac
+done
+files+=("$@")
+[ ${#files[@]} -gt 0 ] || usage
+[ -z "$out" ] || [ ${#files[@]} -eq 1 ] || die 2 "-o works with one input only"
+isnum "$ratio" && awk -v r="$ratio" 'BEGIN { exit !(r >= 0 && r <= 1) }' || die 2 "--ratio must be a number from 0 to 1"
+case $seed in '' | *[!0-9a-zA-Z_-]*) die 2 "--seed must be a plain word or number" ;; esac
+case $pad in '' | *[!0-9]*) die 2 "--pad must be a whole number" ;; esac
+case $minconf in '' | *[!0-9]*) die 2 "--min-conf must be a whole number" ;; esac
+case $quant in '' | [1-9] | [1-9][0-9]*) ;; *) die 2 "--quant must be a positive whole number" ;; esac
+isnum "$fps" && awk -v f="$fps" 'BEGIN { exit !(f > 0 && f <= 60) }' || die 2 "--fps must be a number above 0 and up to 60"
+[ -z "$boxes" ] || [ -f "$boxes" ] || die 1 "no such boxes file: $boxes"
+
+have python3 && python3 -c 'import PIL.Image, PIL.ImageDraw, PIL.ImageFont' 2> /dev/null ||
+	die 3 "python3 with Pillow is needed (pacman -S python-pillow, apt install python3-pil)"
+
+ocr=${TEXTSWAP_TESSERACT:-tesseract}
+if [ -z "$boxes" ] && ! have "$ocr"; then
+	die 3 "no OCR engine: tesseract is not installed and no --boxes FILE was given.
+  Arch:    pacman -S tesseract tesseract-data-eng   (add tesseract-data-pol etc. for other languages)
+  Debian:  apt install tesseract-ocr
+  or run inside a podman container (Containerfile recipe in docs/textswap.md),
+  or give the word boxes yourself: --boxes FILE  (lines: x y w h text)"
+fi
+if [ -z "$font" ]; then
+	font=$(find_font)
+	[ -n "$font" ] || die 3 "no font with Chinese glyphs found (fc-list :lang=zh is empty).
+  Arch:    pacman -S noto-fonts-cjk     (or wqy-zenhei, adobe-source-han-sans-otc-fonts)
+  Debian:  apt install fonts-noto-cjk   (or fonts-wqy-zenhei)
+  or point at one: --font /path/to/font.ttc"
+fi
+[ -f "$font" ] || die 3 "font not found: $font"
+
+# swap_one IN OUT QUANT : OCR when needed, then the Python swapper
+swap_one() {
+	local in=$1 o=$2 q=$3 args kind=boxes bf=$boxes
+	if [ -z "$boxes" ]; then
+		bf=$TMP/ocr.tsv kind=tsv
+		if [ -n "$lang" ]; then
+			"$ocr" "$in" - -l "$lang" tsv > "$bf" 2> "$TMP/ocr.err" < /dev/null
+		else
+			"$ocr" "$in" - tsv > "$bf" 2> "$TMP/ocr.err" < /dev/null
+		fi || { echo "textswap: OCR failed on $in: $(head -c 300 "$TMP/ocr.err")" >&2; return 1; }
+	fi
+	args=(--boxes-file="$bf" --kind="$kind" --ratio="$ratio" --seed="$seed" --font="$font" --pad="$pad" --quant="$q" --min-conf="$minconf")
+	[ "$verbose" -eq 1 ] && args+=(-v)
+	[ "$q" -ne 1 ] && args+=(--quiet)
+	python3 -c "$PY" "${args[@]}" -- "$in" "$o"	# = and -- : a seed, font or file name starting with a dash is a value, not an option
+}
+
+is_video() {
+	case $(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]') in mp4 | mkv | webm | mov | avi | m4v) return 0 ;; esac
+	return 1
+}
+
+# video_duration FILE: seconds; a recording written to a pipe (browser screen recorders) has no duration in the header,
+# then the stream is decoded once and the last timestamp is taken
+video_duration() {
+	local d
+	d=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$1" 2> /dev/null | head -n 1)
+	if ! isnum "${d:-x}"; then
+		d=$(ffmpeg -nostdin -v error -stats -i "$1" -map 0:v:0 -f null - 2>&1 | tr '\r' '\n' | grep -o 'time=[0-9:.]*' | tail -n 1 |
+			awk -F'[=:]' 'NF == 4 { printf "%.3f", $2 * 3600 + $3 * 60 + $4 }')
+	fi
+	printf '%s' "$d"
+}
+
+swap_video() {
+	local in=$1 o=$2 dur srcfps f n i vf acodec vcodec
+	have ffmpeg && have ffprobe || die 3 "video needs ffmpeg and ffprobe (pacman -S ffmpeg)"
+	dur=$(video_duration "$in")
+	isnum "${dur:-x}" || { echo "textswap: $in: ffprobe cannot read it as a video" >&2; return 1; }
+	if [ "$long" -eq 0 ] && awk -v d="$dur" 'BEGIN { exit !(d > 120) }'; then
+		echo "textswap: $in is $(awk -v d="$dur" 'BEGIN { printf "%.0f", d }') s long; the limit is 120 s, --long lifts it" >&2
+		return 1
+	fi
+	srcfps=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=nw=1:nk=1 "$in" 2> /dev/null | head -n 1)
+	srcfps=$(awk -v r="${srcfps:-0/1}" 'BEGIN { split(r, a, "/"); if (a[2] + 0 > 0) printf "%.2f", a[1] / a[2]; else printf "%.2f", a[1] }')
+	if awk -v f="$fps" -v s="$srcfps" 'BEGIN { exit !(f < s) }'; then
+		echo "textswap: note: the source runs at $srcfps fps; the output is at $fps fps (raise it with --fps)" >&2
+	fi
+	mkdir -p "$TMP/in" "$TMP/out"
+	ffmpeg -nostdin -v error -i "$in" -map 0:v:0 -vf "fps=$fps" "$TMP/in/f_%06d.png" || { echo "textswap: cannot extract frames from $in" >&2; return 1; }
+	n=$(find "$TMP/in" -name 'f_*.png' | wc -l)
+	[ "$n" -gt 0 ] || { echo "textswap: no frames in $in" >&2; return 1; }
+	i=0
+	for f in "$TMP"/in/f_*.png; do
+		i=$((i + 1))
+		swap_one "$f" "$TMP/out/${f##*/}" "${quant:-12}" || return 1
+		[ $((i % 10)) -eq 0 ] && echo "textswap: frame $i of $n" >&2
+	done
+	vf='pad=ceil(iw/2)*2:ceil(ih/2)*2,tpad=stop_mode=clone:stop_duration=1,format=yuv420p'
+	case ${o##*.} in
+	webm) vcodec=(-c:v libvpx-vp9 -crf 32 -b:v 0) acodec=(-c:a libopus) ;;
+	*) vcodec=(-c:v libx264 -crf 18) acodec=(-c:a aac) ;;
+	esac
+	ffmpeg -nostdin -v error -y -framerate "$fps" -i "$TMP/out/f_%06d.png" -i "$in" -map 0:v -map '1:a?' \
+		-vf "$vf" "${vcodec[@]}" "${acodec[@]}" -t "$dur" "$o" || { echo "textswap: cannot encode $o" >&2; return 1; }
+	echo "textswap: $n frames at $fps fps -> $o"
+}
+
+rc=0
+for in in "${files[@]}"; do
+	[ -f "$in" ] || { echo "textswap: no such file: $in" >&2; rc=1; continue; }
+	bn=${in##*/}	# the extension is the one of the file name, not of a folder with a dot
+	case $bn in ?*.*) stem=${in%.*} ext=${bn##*.} ;; *) stem=$in ext=png ;; esac
+	if is_video "$in"; then dflt=$stem.swapped.mp4; case $ext in webm) dflt=$stem.swapped.webm ;; esac
+	else dflt=$stem.swapped.$ext; fi
+	o=${out:-$dflt}
+	if [ "$in" -ef "$o" ]; then echo "textswap: refusing to overwrite the input $in" >&2; rc=1; continue; fi
+	if [ -e "$o" ] && [ "$force" -eq 0 ]; then echo "textswap: $o exists (-f overwrites it)" >&2; rc=1; continue; fi
+	[ -d "$(dirname "$o")" ] || { echo "textswap: no such folder for $o" >&2; rc=1; continue; }
+	[ -n "$TMP" ] || TMP=$(mktemp -d "${TMPDIR:-/tmp}/textswap.XXXXXX") || die 1 "cannot make a temp folder"
+	if is_video "$in"; then
+		[ "$(printf '%s' "$o" | tr '[:upper:]' '[:lower:]')" != "${o%.*}.png" ] || { echo "textswap: $o: a video needs a video name" >&2; rc=1; continue; }
+		swap_video "$in" "$o" || rc=$?
+		find "$TMP" -mindepth 1 -delete 2> /dev/null
+	else
+		swap_one "$in" "$o" "${quant:-1}" || rc=$?
+	fi
+done
+exit "$rc"

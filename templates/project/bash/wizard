@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# wizard - ask a few questions with lib/wizard and write the answers to a config file. 0 arguments.
+# Template: copy next to lib/wizard (or put `wizard` on PATH), edit STEPS and the output file.
+# STEPS format, one per line:  var|prompt  /  var|prompt|a,b,c  /  var|prompt|a,b,c|default   (Esc goes back a step, first step cancels)
+set -eu
+cd "$(dirname "$(readlink -f "$0")")" || exit 1
+W=${WIZARD:-$(command -v wizard-lib 2>/dev/null || echo ./lib/wizard)}   # EDIT: path of the wizard tool
+[ -x "$W" ] || { echo "wizard: $W not found (clone Gucixdev/bash and set WIZARD=.../lib/wizard)" >&2; exit 1; }
+
+out=${XDG_CONFIG_HOME:-$HOME/.config}/NAME/config   # EDIT: where the answers go
+mkdir -p "$(dirname "$out")"
+
+answers=$("$W" <<'STEPS'
+name|Your name
+mode|Mode|fast,safe,paranoid|safe
+path|Install path|
+STEPS
+) || { echo "wizard: cancelled, nothing written" >&2; exit 1; }
+# shellcheck disable=SC2154,SC2034
+eval "$answers"                                    # the wizard quotes every value, so this is safe
+
+tmp=$(mktemp "$out.XXXXXX")                        # atomic: write beside the target, then rename
+# shellcheck disable=SC2154
+{ printf 'name=%s\nmode=%s\npath=%s\n' "$name" "$mode" "$path"; } > "$tmp"
+mv "$tmp" "$out"
+echo "wizard: wrote $out"

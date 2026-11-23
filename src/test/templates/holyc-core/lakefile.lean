@@ -1,0 +1,16 @@
+import Lake
+open Lake DSL
+
+/- Core Lean only, so a build takes seconds. When a proof needs Mathlib, add it to the lakefile:
+   require mathlib from git "https://github.com/leanprover-community/mathlib4.git" @ "v4.26.0" -/
+require holyc from "../../lean4"
+
+package «base_lean» where
+  leanOptions := #[⟨`autoImplicit, false⟩]
+
+@[default_target]
+lean_lib «Base» where
+  roots := #[`Base]
+
+lean_exe allocoracle where
+  root := `Oracle

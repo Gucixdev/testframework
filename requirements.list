@@ -41,6 +41,10 @@ cmd rustc pacman=rust apt=rustc nix=rustc
 cmd cargo pacman=rust apt=cargo nix=cargo
 cmd cargo-audit pacman=cargo-audit apt=- nix=cargo-audit
 cmd cargo-fuzz pacman=cargo-fuzz apt=- nix=cargo-fuzz
+# rustup replaces the pacman package `rust` (they conflict: `sudo pacman -S rustup` asks to remove rust), then
+# `rustup default stable` and `rustup toolchain install nightly` (lore wants `cargo +nightly fmt`).
+cmd rustup apt=- nix=rustup
+cmd jaq apt=- nix=jaq
 
 # --- Go ---
 cmd go pacman=go apt=golang-go nix=go

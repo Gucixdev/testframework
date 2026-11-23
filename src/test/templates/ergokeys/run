@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# run - check the Lean proofs: they compile, every theorem rests only on Lean's three standard axioms, and the source
+# holds no sorry, admit, native_decide or own axiom. Needs lean (elan); without it the step is skipped. No arguments.
+set -eu
+cd "$(dirname "$0")"
+export PATH="$HOME/.elan/bin:$PATH"
+command -v lean > /dev/null || { echo "lean not installed: proofs skipped"; exit 0; }
+out=$(lean Ergokeys.lean 2>&1) || { echo "$out"; exit 1; }
+if echo "$out" | grep -qE 'error|warning|sorry'; then echo "$out"; exit 1; fi
+bad=$(echo "$out" | grep 'depends on axioms' | grep -vE '\[(propext|Classical\.choice|Quot\.sound)(, (propext|Classical\.choice|Quot\.sound))*\]$' || true)
+[ -z "$bad" ] || { echo "unexpected axioms:"; echo "$bad"; exit 1; }
+if grep -nE '\b(sorry|admit|native_decide|bv_decide)\b|^axiom ' Ergokeys.lean; then echo "forbidden construct"; exit 1; fi
+echo "$out" | grep -c 'depends on axioms' | xargs printf 'lean: %s theorems checked, axioms ok\n'

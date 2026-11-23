@@ -1,0 +1,1 @@
+biblioteka do analizy modeli AI i pracy nad siatkami/danymi/guardrails etc 

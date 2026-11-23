@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# lean4/run - base's proofs: build, axiom audit, source scan, the differential test of the arena and pool against
+# the model (c/alloc_harness.c replayed by allocoracle; every arena_calloc block must read zero, every arena_realloc
+# block keep its bytes) and the mutants of src/ it must catch. The steps are in ../../lean4/lib.sh; SEEDS=N sets the
+# seeds per compiler (default 200).
+. "$(dirname "$0")/../../lean4/lib.sh" || exit 2
+lean_build
+lean_audit
+lean_scan
+diff_test c/alloc_harness.c allocoracle
+mutant granules core_arena_alloc.h 's|size_t size = size_bytes / sizeof(u64) + (size_bytes % sizeof(u64) != 0);|size_t size = size_bytes / sizeof(u64) + (size_bytes % sizeof(u64) > 1);|'
+mutant align-mask core_arena_alloc.h 's|aligned_addr = (addr + align - 1) \& ~(align - 1);|aligned_addr = (addr + align) \& ~(align - 1);|'
+mutant rewind core_arena_alloc.h 's|m.region->count = m.count;|m.region->count = m.count + 1;|'
+mutant keep-high core_arena_alloc.h 's|if (r->count > r->high) r->high = r->count;|if (r->count > r->high) r->high = r->count - 1;|'
+mutant calloc-zero core_arena_alloc.h 's|memset(p, 0, dirty - off < n ? dirty - off : n);|memset(p, 0, dirty - off < n ? (dirty - off) / 2 : n);|'
+mutant realloc-top core_arena_alloc.h 's|(u64 \*)oldptr + og == \&r->data\[r->count\]|(u64 *)oldptr + og <= \&r->data[r->count]|'
+mutant decommit core_arena_alloc.h 's|r->high = (size_t)(from - data) / sizeof(u64);|r->high = 0;|'
+mutant pool-align core_pool_alloc.h 's|return (n + align - 1) \& ~(align - 1);|return (n + align) \& ~(align - 1);|'
+mutant pool-fresh core_pool_alloc.h 's|p->fresh += p->chunk_size;|p->fresh += 2 * p->chunk_size;|'
+sanitize
+fuzz_diff
+crash_test
+stress
+lean_end

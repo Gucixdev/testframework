@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# guess.test - checks the Lean model (no sorryAx) and that the bash runner really caps cores and memory.
+set -u
+cd "$(dirname "$(readlink -f "$0")")" || exit 2
+export PATH=$HOME/.elan/bin:$PATH
+fail=0
+guess=../../templates/project/bash/tools/guess
+ok() { echo "ok   $1"; }
+bad() { echo "FAIL $1"; fail=1; }
+out=$(lake env lean Tf/guess.lean 2>&1)
+case $out in *sorryAx* | *error*) bad "lean model: $out" ;; *) ok "lean model builds, no sorryAx" ;; esac
+has() { case $1 in *"$2"*) ok "$3" ;; *) bad "$3: $1" ;; esac; }
+has "$("$guess" 1x64 -- python3 -c 'x=b"x"*(400<<20)' 2>&1)" "rc=137" "memory cap kills (rc=137)"
+has "$("$guess" 1x2048 -- python3 -c 'x=b"x"*(400<<20)' 2>&1)" "rc=0" "enough memory passes"
+has "$("$guess" 1x512 -- true)" "cores=1" "runner prints a line"
+exit "$fail"

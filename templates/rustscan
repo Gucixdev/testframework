@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# rustscan - safety-critical scan of Rust repos. Reads code, changes nothing.
+#
+# Counts, per repo, the constructs that the Safety-Critical Rust Coding Guidelines (Rust Foundation consortium,
+# rustfoundation/safety-critical-rust-coding-guidelines, still drafts) and the MISRA C themes carried over to Rust
+# (MISRA C:2025 Addendum 6) care about: unsafe, panics, lossy casts, integer-to-pointer, macros, FFI, asm.
+# Each rule shows the guideline id when the consortium has written one (gui_...), else the theme only. The text of
+# MISRA Addendum 6 is paid and was not read: nothing here claims MISRA compliance, only the same themes.
+#
+# usage: rustscan [-c] [-o DIR] [PATH...]
+#   PATH   a Rust repo (has Cargo.toml) or a folder holding repos (one level down). Default: the current folder.
+#   -o DIR report folder, one TSV per repo: rule, file:line, text (default ./rustscan-report)
+#   -c     also run `cargo clippy` with the matching restriction lints (compiles each repo, slow, needs the deps)
+# Skips target/, tests/, benches/ and examples/ (tests may unwrap). A hit is a place to look at, not a verdict.
+# Exit 0 always when the scan ran; 2 on bad usage.
+
+case ${1:-} in -h | --help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;; esac
+
+out=./rustscan-report clippy=0
+while getopts co: o; do
+	case $o in
+	c) clippy=1 ;;
+	o) out=$OPTARG ;;
+	*) echo "usage: rustscan [-c] [-o DIR] [PATH...]" >&2; exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] && set -- .
+
+# rule id | guideline | description | ERE
+RULES=(
+	'U1|unsafety|unsafe block|\bunsafe[[:space:]]*\{'
+	'U2|unsafety|unsafe fn, impl or trait|\bunsafe[[:space:]]+(fn|impl|trait)\b'
+	'U3|unsafety|static mut|\bstatic[[:space:]]+mut\b'
+	'U4|unsafety|mem::transmute|\btransmute(::<[^>]*>)?[[:space:]]*\('
+	'U5|unsafety|mem::forget / ManuallyDrop leak|\bmem::forget[[:space:]]*\('
+	'E1|errors|unwrap() or expect()|\.(unwrap|expect)[[:space:]]*\('
+	'E2|errors|panic!, todo!, unimplemented!, unreachable!|\b(panic|todo|unimplemented|unreachable)!'
+	'E3|errors|process::exit|\bprocess::exit[[:space:]]*\('
+	'X1|gui_ADHABsmK9FXz|as with a numeric type|\bas[[:space:]]+(u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64)\b'
+	'X2|gui_HDnAZ7EZ4z6G|as _ / pointer cast|\bas[[:space:]]+(_\b|\*(const|mut)\b)'
+	'X3|gui_PM8Vpf7lZ51U|integer converted to pointer|\b(usize|u64|u32|isize)\)?[[:space:]]+as[[:space:]]+\*(const|mut)\b|\bfrom_exposed_addr|\bwith_exposed_provenance'
+	'X4|gui_dCquvqE1csI3|unchecked or wrapping arithmetic chosen by hand|\.(unchecked_(add|sub|mul|shl|shr)|wrapping_(add|sub|mul|shl|shr))[[:space:]]*\('
+	'M1|gui_h0uG1C9ZjryA|declarative macro (macro_rules!)|\bmacro_rules!'
+	'M2|gui_66FSqzD55VRZ|procedural macro|#\[proc_macro(_derive|_attribute)?\b'
+	'F1|ffi|extern "C" or #[no_mangle]|\bextern[[:space:]]+"C"|#\[(unsafe\()?no_mangle'
+	'A1|asm|inline assembly|\b(core::arch::)?(global_|naked_)?asm!'
+)
+
+# unsafe { without a SAFETY: comment on the same line or in the 3 lines above (undocumented unsafe)
+nosafety() {
+	awk '
+	FNR == 1 { cover = 0 }
+	/SAFETY:/ { cover = 4 }   # one comment documents the next unsafe block within 3 lines, and only that one
+	/(^|[^A-Za-z_])unsafe[[:space:]]*\{/ { if (cover > 0) cover = 0; else print FILENAME ":" FNR ":" $0 }
+	{ if (cover > 0) cover-- }' "$@"
+}
+
+# unsafe inside a macro_rules! body in the 40 lines after it opens: gui_FRLaMIMb4t3S (do not hide unsafe in macros)
+unsafe_in_macro() {
+	awk '
+	FNR == 1 { left = 0 }
+	/macro_rules!/ { left = 40 }
+	left > 0 && /(^|[^A-Za-z_])unsafe([^A-Za-z_]|$)/ { print FILENAME ":" FNR ":" $0 }
+	{ if (left > 0) left-- }' "$@"
+}
+
+# tsv ID GUIDELINE: stdin "file:line:text" -> report rows "ID<TAB>GUIDELINE<TAB>file:line<TAB>text"
+tsv() {
+	awk -v id="$1" -v g="$2" '{ match($0, /^[^:]+:[0-9]+:/); loc = substr($0, 1, RLENGTH - 1); txt = substr($0, RLENGTH + 1)
+		gsub(/^[ \t]+|[ \t]+$/, "", txt); printf "%s\t%s\t%s\t%s\n", id, g, loc, txt }'
+}
+
+scan_repo() {	# scan_repo DIR -> prints one summary line, writes the report
+	local dir=$1 name rs report line id g d re n total=0 sum=""
+	name=$(basename "$(cd "$dir" && pwd)")
+	mapfile -d '' rs < <(find "$dir" \( -name target -o -name tests -o -name benches -o -name examples -o -name .git \) -prune -o -name '*.rs' -type f -print0)
+	report=$out/$name.tsv
+	: > "$report"
+	if [ ${#rs[@]} -gt 0 ]; then
+		for line in "${RULES[@]}"; do
+			IFS='|' read -r id g d re <<< "$line"
+			n=$(grep -nHE -- "$re" "${rs[@]}" | tsv "$id" "$g" | tee -a "$report" | wc -l)
+			[ "$n" -gt 0 ] && sum="$sum $id=$n" && total=$((total + n))
+		done
+		n=$(nosafety "${rs[@]}" | tsv U6 unsafety | tee -a "$report" | wc -l)
+		[ "$n" -gt 0 ] && sum="$sum U6=$n" && total=$((total + n))
+		n=$(unsafe_in_macro "${rs[@]}" | tsv M3 gui_FRLaMIMb4t3S | tee -a "$report" | wc -l)
+		[ "$n" -gt 0 ] && sum="$sum M3=$n" && total=$((total + n))
+	fi
+	printf '%-26s %5d hits, %3d files %s\n' "$name" "$total" "${#rs[@]}" "$sum"
+	[ "$clippy" = 1 ] && run_clippy "$dir" "$name"
+	return 0
+}
+
+LINTS=(unwrap_used expect_used panic todo unimplemented indexing_slicing arithmetic_side_effects integer_division
+	as_conversions cast_possible_truncation cast_sign_loss undocumented_unsafe_blocks missing_safety_doc mem_forget
+	exit string_slice wildcard_enum_match_arm float_cmp)
+
+run_clippy() {
+	local dir=$1 name=$2 args=() l
+	for l in "${LINTS[@]}"; do args+=(-W "clippy::$l"); done
+	( cd "$dir" && cargo clippy --all-targets --message-format=short -- "${args[@]}" 2>&1 ) > "$out/$name.clippy.txt" || true
+	printf '  clippy: %s\n' "$(grep -c 'warning:\|error:' "$out/$name.clippy.txt") messages -> $out/$name.clippy.txt"
+}
+
+mkdir -p "$out" || { echo "rustscan: cannot create $out" >&2; exit 2; }
+found=0
+for p in "$@"; do
+	if [ -f "$p/Cargo.toml" ]; then
+		scan_repo "$p"; found=$((found + 1))
+	elif [ -d "$p" ]; then
+		for d in "$p"/*/; do
+			[ -f "${d}Cargo.toml" ] && { scan_repo "${d%/}"; found=$((found + 1)); }
+		done
+	else
+		echo "rustscan: $p is not a folder" >&2
+	fi
+done
+[ "$found" -gt 0 ] || echo "rustscan: no Cargo.toml under the given paths" >&2
+echo "reports: $out/<repo>.tsv   rules: U unsafe, E errors, X casts+arithmetic, M macros, F ffi, A asm (rustscan -h)"
